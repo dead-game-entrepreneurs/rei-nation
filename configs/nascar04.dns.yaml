@@ -1,0 +1,6 @@
+# Example for revive-dns. Replace the documentation address with your server.
+# Preserve your existing DNAS routing.
+- service: rei-nation-nascar04
+  names:
+    - ps2nascar04.ea.com
+  answer: "192.0.2.10"

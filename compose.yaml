@@ -1,0 +1,56 @@
+name: rei-nation
+
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: eanation
+      POSTGRES_USER: eanation
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${REI_NATION_PG_PORT:-55434}:5432"
+    volumes:
+      - postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eanation -d eanation"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rei-nation:
+    build: .
+    image: ${REI_NATION_IMAGE:-rei-nation:local}
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      REI_NATION_GAMES: ${REI_NATION_GAMES:-nascar04}
+      REI_NATION_BIND: ${REI_NATION_BIND:-0.0.0.0}
+      REI_NATION_PUBLIC_IP: ${REI_NATION_PUBLIC_IP:?set REI_NATION_PUBLIC_IP in .env}
+      REI_NATION_HEALTH_PORT: ${REI_NATION_HEALTH_PORT:-8086}
+      REI_NATION_RELAY: ${REI_NATION_RELAY:-auto}
+      REI_NATION_PG_PORT: ${REI_NATION_PG_PORT:-55434}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      REI_NATION_SMTP_ADDR: ${REI_NATION_SMTP_ADDR:-}
+      REI_NATION_SMTP_FROM: ${REI_NATION_SMTP_FROM:-}
+      REI_NATION_SMTP_USER: ${REI_NATION_SMTP_USER:-}
+      REI_NATION_SMTP_PASSWORD: ${REI_NATION_SMTP_PASSWORD:-}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "/rei-nation", "-healthcheck"]
+      interval: 10s
+      timeout: 4s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres:
