@@ -79,6 +79,7 @@ type gamePlayer struct {
 	ip      string
 	port    int
 	ticket  string
+	lid     string // the lobby the joiner asked from; echoed in EGEG
 	entered bool
 	attrs   map[string]string
 }
@@ -216,19 +217,14 @@ func (h *theater) gameList(c *aries.Client, m fesl.Message, tid string) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	var found []*hostedGame
-	for _, g := range h.games {
-		if g.lid == lid {
-			found = append(found, g)
-		}
-	}
-	n := strconv.Itoa(len(found))
+	// Every lobby lists every game. Consoles pick their lobby from their own
+	// region setting, so a host and a joiner on the same network can land in
+	// different lobbies; a shared pool lets them still see each other.
+	n := strconv.Itoa(len(h.games))
 	c.Send(fesl.Packet("GLST", msgOK, field("TID", tid), field("LID", lid),
 		field("NUM-GAMES", n), field("LOBBY-MAX-GAMES", "100"), field("LOBBY-NUM-GAMES", n)))
 	for _, g := range h.games {
-		if g.lid == lid {
-			c.Send(fesl.Packet("GDAT", msgOK, h.gameDataFields(g, tid, c.Addr().String())...))
-		}
+		c.Send(fesl.Packet("GDAT", msgOK, h.gameDataFields(g, tid, lid)...))
 	}
 }
 
@@ -243,8 +239,12 @@ func (h *theater) gameData(c *aries.Client, m fesl.Message, tid string) {
 	if g == nil {
 		return
 	}
-	c.Send(fesl.Packet("GDAT", msgOK, h.gameDataFields(g, tid, c.Addr().String())...))
-	details := []fesl.Field{field("TID", tid), field("LID", g.lid), field("GID", strconv.Itoa(gid)), field("UGID", strconv.Itoa(gid))}
+	lid, ok := m.GetFold("lid")
+	if !ok || !validID(lid) {
+		lid = g.lid
+	}
+	c.Send(fesl.Packet("GDAT", msgOK, h.gameDataFields(g, tid, lid)...))
+	details := []fesl.Field{field("TID", tid), field("LID", lid), field("GID", strconv.Itoa(gid)), field("UGID", strconv.Itoa(gid))}
 	for k, v := range g.details {
 		details = append(details, field(k, v))
 	}
@@ -253,7 +253,7 @@ func (h *theater) gameData(c *aries.Client, m fesl.Message, tid string) {
 		if !p.entered {
 			continue
 		}
-		pf := []fesl.Field{field("TID", tid), field("LID", g.lid), field("GID", strconv.Itoa(gid)),
+		pf := []fesl.Field{field("TID", tid), field("LID", lid), field("GID", strconv.Itoa(gid)),
 			field("PID", strconv.Itoa(pid)), field("NAME", p.name), field("UID", strconv.FormatInt(p.uid, 10))}
 		for k, v := range p.attrs {
 			pf = append(pf, field(k, v))
@@ -262,12 +262,13 @@ func (h *theater) gameData(c *aries.Client, m fesl.Message, tid string) {
 	}
 }
 
-// gameDataFields builds a GDAT body for a game as seen by a viewer. Callers hold h.mu.
-func (h *theater) gameDataFields(g *hostedGame, tid, viewerIP string) []fesl.Field {
+// gameDataFields builds a GDAT body for a game, reported in the viewer's
+// lobby. Callers hold h.mu.
+func (h *theater) gameDataFields(g *hostedGame, tid, lid string) []fesl.Field {
 	ext := h.externalOf(g.owner, g.hostIP, g.port)
 	active, joining := playerCounts(g)
 	out := []fesl.Field{
-		field("TID", tid), field("LID", g.lid), field("GID", strconv.Itoa(g.gid)),
+		field("TID", tid), field("LID", lid), field("GID", strconv.Itoa(g.gid)),
 		field("N", g.name), field("MP", strconv.Itoa(g.max)), field("I", ext.ip), field("P", strconv.Itoa(ext.port)),
 		field("PW", "0"), field("AP", strconv.Itoa(active)), field("JP", strconv.Itoa(joining)), field("QP", "0"),
 		field("HN", g.host.personaName), field("HU", strconv.FormatInt(g.host.personaID, 10)),
@@ -353,7 +354,7 @@ func (h *theater) enterGame(c *aries.Client, m fesl.Message, tid string) {
 
 	h.mu.Lock()
 	g := h.games[gid]
-	if g == nil || g.lid != lid {
+	if g == nil { // any lobby: see gameList
 		h.mu.Unlock()
 		c.Send(fesl.Packet("EGAM", 0x6E67616D, field("TID", tid))) // "ngam": no such game
 		return
@@ -378,7 +379,10 @@ func (h *theater) enterGame(c *aries.Client, m fesl.Message, tid string) {
 	}
 	joinerIP := c.Addr().String()
 	ticket := newSecret()
-	g.pending[pid] = &gamePlayer{writer: c, name: t.id.personaName, uid: t.id.personaID, ip: joinerIP, port: port, ticket: ticket, attrs: map[string]string{}}
+	if !validID(lid) {
+		lid = g.lid
+	}
+	g.pending[pid] = &gamePlayer{writer: c, name: t.id.personaName, uid: t.id.personaID, ip: joinerIP, port: port, ticket: ticket, lid: lid, attrs: map[string]string{}}
 	ext := h.externalOf(c, joinerIP, port)
 	owner := g.owner
 	h.mu.Unlock()
@@ -431,7 +435,7 @@ func (h *theater) joinResponse(c *aries.Client, m fesl.Message, tid string) {
 	self := pending.writer == g.owner
 	joiner := pending.writer
 	gid := g.gid
-	lid := g.lid
+	lid := pending.lid
 	h.mu.Unlock()
 
 	if tid != "0" {

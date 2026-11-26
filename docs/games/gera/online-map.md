@@ -142,8 +142,8 @@ has no relay or internet NAT traversal.
 | --- | --- | --- |
 | `CONN` | Protocol negotiation. | Live. |
 | `USER` | Authenticate with the login `lkey`. | Live. |
-| `LLST`/`LDAT` | One lobby, named `NorthAmerica` with `FAVORITE-PLAYERS=1`. Depending on its mode the client hosts only in a lobby whose name matches its region string, or whose `FAVORITE-PLAYERS` is non-zero; otherwise it fails with `nrom` and never sends `CGAM`. | Live. |
-| `CGAM` | Host a game; reply carries GID and a UDP secret. | Implemented. |
+| `LLST`/`LDAT` | Two lobbies, `NorthAmerica` and `Asia`, each with `FAVORITE-PLAYERS=1`. The client picks the first lobby whose name matches the region string it derives from the console language, or, in some modes, whose `FAVORITE-PLAYERS` is non-zero; with no match it fails with `nrom` and never sends `CGAM`. Two consoles on one network can pick different lobbies, so every lobby lists and admits every game. | Tested in game. |
+| `CGAM` | Host a game; reply carries GID and a UDP secret. | Tested in game. |
 | `GLST`/`GDAT`/`GDET`/`PDAT` | List games and their details. | Implemented. |
 | `EGAM`→`EGRQ` | Join request, forwarded to the host. | Implemented. |
 | `EGRS`→`EGEG` | Host's answer, forwarded to the joiner with the host endpoint. | Implemented. |

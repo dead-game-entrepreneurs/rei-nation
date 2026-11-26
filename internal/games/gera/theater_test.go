@@ -283,3 +283,50 @@ func TestTheaterHostAndJoin(t *testing.T) {
 		t.Fatalf("EGEG INT-IP = %q, want suppressed 0.0.0.0", v)
 	}
 }
+
+// Consoles choose their lobby from their own region setting, so a host and a
+// joiner on one network can pick different lobbies. Games must still be listed
+// and joinable from every lobby.
+func TestTheaterGamesVisibleAcrossLobbies(t *testing.T) {
+	s := newTestServer(t)
+	hostKey := s.issueKey(identity{accountID: 1, personaID: 10, personaName: "Host"})
+	joinKey := s.issueKey(identity{accountID: 2, personaID: 20, personaName: "Joiner"})
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- aries.ServeWithOptions(ctx, ln, s.theater, aries.ServeOptions{IdleTimeout: time.Minute})
+	}()
+	defer func() {
+		cancel()
+		ln.Close()
+		<-done
+	}()
+
+	host := dialTheater(t, s, ln.Addr().String(), hostKey)
+	defer host.conn.Close()
+	host.send("CGAM", field("tid", "3"), field("lid", "2"), field("name", "Asia Game"), field("port", "18040"))
+	cgam := host.read()
+	gid, _ := cgam.Get("GID")
+
+	joiner := dialTheater(t, s, ln.Addr().String(), joinKey)
+	defer joiner.conn.Close()
+	joiner.send("GLST", field("tid", "4"), field("lid", "1"))
+	if v, _ := joiner.read().Get("NUM-GAMES"); v != "1" {
+		t.Fatalf("lobby 1 NUM-GAMES = %q, want the lobby 2 game listed", v)
+	}
+	gdat := joiner.read()
+	if v, _ := gdat.Get("LID"); v != "1" {
+		t.Fatalf("GDAT LID = %q, want the viewer's lobby 1", v)
+	}
+	joiner.send("EGAM", field("tid", "5"), field("gid", gid), field("lid", "1"), field("port", "18040"))
+	if m := joiner.read(); m.Service != "EGAM" || m.Code != msgOK {
+		t.Fatalf("cross-lobby EGAM = %s %#x, want accepted", m.Service, m.Code)
+	}
+	if m := host.read(); m.Service != "EGRQ" {
+		t.Fatalf("host expected EGRQ, got %s", m.Service)
+	}
+}
