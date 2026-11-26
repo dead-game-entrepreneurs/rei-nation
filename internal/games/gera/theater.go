@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -126,7 +127,8 @@ func (h *theater) Handle(_ context.Context, c *aries.Client, f aries.Frame) {
 		tid = "0"
 	}
 	if m.Service != "PING" {
-		h.srv.opts.Log.Info("theater request", "conn", c.ID(), "kind", m.Service, "tid", tid)
+		h.srv.opts.Log.Info("theater request", "conn", c.ID(), "kind", m.Service, "tid", tid,
+			"fields", loggableFields(m))
 	}
 	switch m.Service {
 	case "CONN":
@@ -714,4 +716,17 @@ func newSecret() string {
 	var b [8]byte
 	rand.Read(b[:])
 	return hex.EncodeToString(b[:])
+}
+
+// loggableFields returns a request's fields for diagnostics, without session
+// keys, secrets, tickets or passwords.
+func loggableFields(m fesl.Message) map[string]string {
+	out := m.Fields()
+	for k := range out {
+		switch strings.ToLower(k) {
+		case "lkey", "secret", "ticket", "password":
+			out[k] = "[redacted]"
+		}
+	}
+	return out
 }

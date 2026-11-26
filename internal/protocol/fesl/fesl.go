@@ -58,6 +58,15 @@ func (m Message) Get(key string) (string, bool) {
 	return v, ok
 }
 
+// Fields returns a copy of every decoded field.
+func (m Message) Fields() map[string]string {
+	out := make(map[string]string, len(m.fields))
+	for k, v := range m.fields {
+		out[k] = v
+	}
+	return out
+}
+
 // Prefixed returns the fields whose key starts with prefix (case-insensitive),
 // with each returned key upper-cased. The theater carries game, detail and
 // player attributes as b-, d- and p- prefixed fields.
