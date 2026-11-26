@@ -326,7 +326,33 @@ func TestTheaterGamesVisibleAcrossLobbies(t *testing.T) {
 	if m := joiner.read(); m.Service != "EGAM" || m.Code != msgOK {
 		t.Fatalf("cross-lobby EGAM = %s %#x, want accepted", m.Service, m.Code)
 	}
-	if m := host.read(); m.Service != "EGRQ" {
-		t.Fatalf("host expected EGRQ, got %s", m.Service)
+	egrq := host.read()
+	if egrq.Service != "EGRQ" {
+		t.Fatalf("host expected EGRQ, got %s", egrq.Service)
+	}
+	pid, _ := egrq.Get("PID")
+	host.send("EGRS", field("tid", "6"), field("pid", pid), field("allowed", "1"))
+	if m := host.read(); m.Service != "EGRS" {
+		t.Fatalf("host EGRS reply = %s", m.Service)
+	}
+	if m := joiner.read(); m.Service != "EGEG" {
+		t.Fatalf("joiner expected EGEG, got %s", m.Service)
+	}
+
+	// When the host removes the game at the end of a match, the joiner must
+	// be told, in the lobby it joined from, or it reports an error.
+	host.send("RGAM", field("tid", "7"))
+	if m := host.read(); m.Service != "RGAM" {
+		t.Fatalf("host RGAM reply = %s", m.Service)
+	}
+	grem := joiner.read()
+	if grem.Service != "GREM" {
+		t.Fatalf("joiner expected GREM, got %s", grem.Service)
+	}
+	if v, _ := grem.Get("GID"); v != gid {
+		t.Fatalf("GREM GID = %q, want %q", v, gid)
+	}
+	if v, _ := grem.Get("LID"); v != "1" {
+		t.Fatalf("GREM LID = %q, want the joiner's lobby 1", v)
 	}
 }

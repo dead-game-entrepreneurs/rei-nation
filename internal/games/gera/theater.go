@@ -97,10 +97,11 @@ func (h *theater) session(c *aries.Client) *theaterSession {
 }
 
 func (h *theater) Disconnected(c *aries.Client) {
+	var notices []removal
 	h.mu.Lock()
-	for gid, g := range h.games {
+	for _, g := range h.games {
 		if g.owner == c {
-			delete(h.games, gid)
+			notices = append(notices, h.closeGame(g)...)
 			continue
 		}
 		// Drop this connection's membership from any game it had joined.
@@ -119,7 +120,45 @@ func (h *theater) Disconnected(c *aries.Client) {
 	delete(h.connIP, c)
 	delete(h.observed, c)
 	h.mu.Unlock()
+	sendRemovals(notices)
 	h.srv.opts.Log.Info("theater client disconnected", "conn", c.ID(), "reason", c.CloseReason())
+}
+
+// removal is a GREM notice owed to a player whose game is gone.
+type removal struct {
+	to  *aries.Client
+	lid string
+	gid int
+}
+
+// closeGame deletes a hosted game and returns the GREM notices owed to its
+// other players and pending joiners, each in the lobby that player used.
+// Without one a joiner finds the host gone at the end of a match and reports
+// an error instead of returning cleanly. Callers hold h.mu.
+func (h *theater) closeGame(g *hostedGame) []removal {
+	delete(h.games, g.gid)
+	var out []removal
+	seen := map[*aries.Client]bool{g.owner: true}
+	for _, list := range []map[int]*gamePlayer{g.players, g.pending} {
+		for _, p := range list {
+			if seen[p.writer] {
+				continue
+			}
+			seen[p.writer] = true
+			lid := p.lid
+			if lid == "" {
+				lid = g.lid
+			}
+			out = append(out, removal{to: p.writer, lid: lid, gid: g.gid})
+		}
+	}
+	return out
+}
+
+func sendRemovals(notices []removal) {
+	for _, n := range notices {
+		n.to.Send(fesl.Packet("GREM", msgOK, field("LID", n.lid), field("GID", strconv.Itoa(n.gid))))
+	}
 }
 
 func (h *theater) Handle(_ context.Context, c *aries.Client, f aries.Frame) {
@@ -315,9 +354,10 @@ func (h *theater) createGame(c *aries.Client, m fesl.Message, tid string) {
 	}
 
 	h.mu.Lock()
-	for gid, g := range h.games { // one current match per host
+	var notices []removal
+	for _, g := range h.games { // one current match per host
 		if g.owner == c {
-			delete(h.games, gid)
+			notices = append(notices, h.closeGame(g)...)
 		}
 	}
 	h.nextGID++
@@ -330,6 +370,7 @@ func (h *theater) createGame(c *aries.Client, m fesl.Message, tid string) {
 	}
 	secret := h.games[gid].secret
 	h.mu.Unlock()
+	sendRemovals(notices)
 
 	h.srv.opts.Log.Info("theater game created", "conn", c.ID(), "gid", gid, "name", name, "host", t.id.personaName)
 	c.Send(fesl.Packet("CGAM", msgOK, field("TID", tid), field("LID", lid), field("GID", strconv.Itoa(gid)),
@@ -556,13 +597,18 @@ func (h *theater) hostReport(c *aries.Client, m fesl.Message, tid string) {
 }
 
 func (h *theater) removeGame(c *aries.Client, tid string) {
+	var notices []removal
 	h.mu.Lock()
-	for gid, g := range h.games {
+	for _, g := range h.games {
 		if g.owner == c {
-			delete(h.games, gid)
+			notices = append(notices, h.closeGame(g)...)
 		}
 	}
 	h.mu.Unlock()
+	sendRemovals(notices)
+	if len(notices) > 0 {
+		h.srv.opts.Log.Info("theater game removed", "conn", c.ID(), "notified", len(notices))
+	}
 	if tid != "0" {
 		c.Send(fesl.Packet("RGAM", msgOK, field("TID", tid)))
 	}

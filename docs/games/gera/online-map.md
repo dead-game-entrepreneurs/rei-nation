@@ -144,10 +144,11 @@ has no relay or internet NAT traversal.
 | `USER` | Authenticate with the login `lkey`. | Live. |
 | `LLST`/`LDAT` | Two lobbies, `NorthAmerica` and `Asia`, each with `FAVORITE-PLAYERS=1`. The client picks the first lobby whose name matches the region string it derives from the console language, or, in some modes, whose `FAVORITE-PLAYERS` is non-zero; with no match it fails with `nrom` and never sends `CGAM`. Two consoles on one network can pick different lobbies, so every lobby lists and admits every game. | Tested in game. |
 | `CGAM` | Host a game; reply carries GID and a UDP secret. | Tested in game. |
-| `GLST`/`GDAT`/`GDET`/`PDAT` | List games and their details. | Implemented. |
-| `EGAM`→`EGRQ` | Join request, forwarded to the host. | Implemented. |
-| `EGRS`→`EGEG` | Host's answer, forwarded to the joiner with the host endpoint. | Implemented. |
-| `ECNL`, `PLVT`, `PENT`, `UGAM`/`UGDE`/`UPLA`/`KEEP`, `RGAM` | Cancel, departures, entry, host reports, remove. | Implemented. |
+| `GLST`/`GDAT`/`GDET`/`PDAT` | List games and their details. | Tested in game. |
+| `EGAM`→`EGRQ` | Join request, forwarded to the host. | Tested in game. |
+| `EGRS`→`EGEG` | Host's answer, forwarded to the joiner with the host endpoint. | Tested in game. |
+| `ECNL`, `PLVT`, `PENT`, `UGAM`/`UGDE`/`UPLA`/`KEEP` | Cancel, departures, entry, host reports. | Tested in game. |
+| `RGAM`→`GREM` | Host removes its game; every other player and pending joiner gets `GREM` in the lobby it joined from. Also sent when the host disconnects or creates a new game. | Synthetic. |
 
 ### UDP endpoint exchange
 
@@ -160,7 +161,8 @@ public endpoint. PCSX2's sockets adapter reports the same internal address
 different console — only to the host's own self-join.
 
 Open: no relay or NAT traversal, so this needs direct reachability (a LAN or
-port forwarding). Verified by tests, not yet in game.
+port forwarding). A full match between two PCSX2 machines on one LAN was
+played on 2026-11-26.
 
 ## Other services named by the client
 
