@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"net/netip"
 	"strconv"
@@ -128,7 +129,7 @@ func (h *theater) Handle(_ context.Context, c *aries.Client, f aries.Frame) {
 	}
 	if m.Service != "PING" {
 		h.srv.opts.Log.Info("theater request", "conn", c.ID(), "kind", m.Service, "tid", tid,
-			"fields", loggableFields(m))
+			"code", fmt.Sprintf("%#08x", m.Code), "fields", loggableFields(m))
 	}
 	switch m.Service {
 	case "CONN":
@@ -192,13 +193,20 @@ func (h *theater) user(c *aries.Client, m fesl.Message, tid string) {
 // The single lobby satisfies both checks.
 const lobbyName = "NorthAmerica"
 
+// lobbies are offered in order; LID is the index plus one. The client takes
+// the first one that passes its check, so "Asia" covers a console whose
+// language setting makes it pick that region string instead.
+var lobbies = []string{lobbyName, "Asia"}
+
 func (h *theater) lobbyList(c *aries.Client, tid string) {
-	c.Send(fesl.Packet("LLST", msgOK, field("TID", tid), field("NUM-LOBBIES", "1")))
-	c.Send(fesl.Packet("LDAT", msgOK,
-		field("TID", tid), field("LID", "1"), field("NAME", lobbyName), field("PASSING", "1"),
-		field("FAVORITE-GAMES", "0"), field("FAVORITE-PLAYERS", "1"), field("LOCALE", "en_US"),
-		field("MAX-GAMES", "100"), field("NUM-GAMES", "0"),
-	))
+	c.Send(fesl.Packet("LLST", msgOK, field("TID", tid), field("NUM-LOBBIES", strconv.Itoa(len(lobbies)))))
+	for i, name := range lobbies {
+		c.Send(fesl.Packet("LDAT", msgOK,
+			field("TID", tid), field("LID", strconv.Itoa(i+1)), field("NAME", name), field("PASSING", "1"),
+			field("FAVORITE-GAMES", "0"), field("FAVORITE-PLAYERS", "1"), field("LOCALE", "en_US"),
+			field("MAX-GAMES", "100"), field("NUM-GAMES", "0"),
+		))
+	}
 }
 
 func (h *theater) gameList(c *aries.Client, m fesl.Message, tid string) {

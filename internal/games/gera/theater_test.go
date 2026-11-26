@@ -148,7 +148,7 @@ func TestTheaterBrowserEntry(t *testing.T) {
 		t.Fatalf("USER NAME = %q", v)
 	}
 
-	// Lobby list: an LLST header followed by one LDAT.
+	// Lobby list: an LLST header followed by one LDAT per lobby.
 	send("LLST", fesl.Field{Key: "tid", Value: "4"})
 	if m := read(); m.Service != "LLST" {
 		t.Fatalf("expected LLST, got %s", m.Service)
@@ -162,6 +162,12 @@ func TestTheaterBrowserEntry(t *testing.T) {
 	}
 	if v, _ := ldat.Get("NAME"); v != lobbyName {
 		t.Fatalf("LDAT NAME = %q", v)
+	}
+	// Remaining lobbies follow, one LDAT each.
+	for i := 1; i < len(lobbies); i++ {
+		if m := read(); m.Service != "LDAT" {
+			t.Fatalf("expected LDAT %d, got %s", i+1, m.Service)
+		}
 	}
 
 	// Game list is empty for now.
