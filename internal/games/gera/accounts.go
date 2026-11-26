@@ -39,6 +39,7 @@ type account struct {
 	personaID   int64
 	personaName string
 	lkey        string
+	rankSession uint32 // rank GetSessionId value, kept for this connection
 }
 
 func (s *server) handleAcct(ctx context.Context, c *aries.Client, m fesl.Message) {

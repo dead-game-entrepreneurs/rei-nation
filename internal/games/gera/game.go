@@ -163,6 +163,8 @@ func (s *server) Handle(ctx context.Context, c *aries.Client, f aries.Frame) {
 		s.handleFsys(c, m)
 	case "acct":
 		s.handleAcct(ctx, c, m)
+	case "rank":
+		s.handleRank(c, m)
 	default:
 		s.opts.Log.Info("unhandled FESL service", "conn", c.ID(), "service", m.Service, "txn", m.TXN)
 	}

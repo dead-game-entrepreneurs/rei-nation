@@ -169,6 +169,11 @@ played on 2026-11-26.
 - Static: `GameSpyPreAuth` returns a `ticket` for a GameSpy match browser. Not
   implemented; may not be needed when the EA theater carries the browser.
 - Static: ProtoMangle at `demangler.ea.com` with game feature `gera-ps2-2004`.
-- Static: `rank` stats (GetTopNAndStats, GetRankedStats) and `acct GetAccount`
-  back the leaderboard, stats and account screens. Not implemented.
+- `rank`: the host asks for `GetRankedStats` when it enters its match. Answered
+  in `rank.go` the way the TimeSplitters server does: `GetSessionId` returns a
+  session ID; `StartReport`, `EndReport`, `AddGameInfo` and `UpdateStats` are
+  accepted and discarded; stats reads (`GetStats`, `GetRankedStats`, `GetTopN`,
+  `GetTopNAndStats`) return an empty `stats.[]`; anything else gets an error
+  reply so a screen does not wait out its timeout. Stats are not stored yet.
+- Static: `acct GetAccount` backs the account screen. Not implemented.
 - Static: EA voice chat through `VOIPF.IRX`.

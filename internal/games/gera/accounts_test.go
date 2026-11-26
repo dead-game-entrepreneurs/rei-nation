@@ -202,3 +202,51 @@ func TestSubAccountsBeforeLogin(t *testing.T) {
 		t.Fatalf("errorCode = %q, want %d before login", code, errNoSuchUser)
 	}
 }
+
+func TestRankService(t *testing.T) {
+	s := newTestServer(t)
+	_, conn, cleanup := dialHandler(t, s)
+	defer cleanup()
+	seq := uint32(0xc0000000)
+	call := func(service, txn string, fields ...fesl.Field) fesl.Message {
+		t.Helper()
+		seq++
+		if err := fesl.Encode(service, seq, txn, fields...).Write(conn); err != nil {
+			t.Fatal(err)
+		}
+		f, err := aries.Read(conn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := fesl.Decode(f)
+		if m.Code != seq || m.TXN != txn {
+			t.Fatalf("%s reply = %q %#x", txn, m.TXN, m.Code)
+		}
+		return m
+	}
+
+	// Stats reads need a persona.
+	if code, _ := call("rank", "GetRankedStats").Get("errorCode"); code != strconv.Itoa(errNoSuchUser) {
+		t.Fatalf("GetRankedStats before login errorCode = %q", code)
+	}
+	call("acct", "AddAccount", fesl.Field{Key: "name", Value: "ranker"}, fesl.Field{Key: "password", Value: "pw"})
+	call("acct", "Login", fesl.Field{Key: "name", Value: "ranker"}, fesl.Field{Key: "password", Value: "pw"})
+	call("acct", "AddSubAccount", fesl.Field{Key: "name", Value: "R1"})
+	call("acct", "LoginSubAccount", fesl.Field{Key: "name", Value: "R1"})
+
+	if v, _ := call("rank", "GetRankedStats").Get("stats.[]"); v != "0" {
+		t.Fatalf("GetRankedStats stats.[] = %q, want 0", v)
+	}
+	sid := call("rank", "GetSessionId")
+	if v, _ := sid.Get("sessionId"); v == "" || v == "0" {
+		t.Fatalf("GetSessionId sessionId = %q", v)
+	}
+	for _, txn := range []string{"StartReport", "UpdateStats", "EndReport"} {
+		if code, ok := call("rank", txn).Get("errorCode"); ok {
+			t.Fatalf("%s errorCode = %q", txn, code)
+		}
+	}
+	if _, ok := call("rank", "GetDateRange").Get("errorCode"); !ok {
+		t.Fatal("unknown rank transaction should get an error reply, not silence")
+	}
+}
