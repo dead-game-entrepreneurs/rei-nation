@@ -1,0 +1,8 @@
+# Example for revive-dns. Replace the documentation address with your server.
+# The game looks up the locale name first and falls back to the short name.
+# Preserve your existing DNAS routing.
+- service: rei-nation-gera
+  names:
+    - gera.en_US.fesl.ea.com
+    - gera.fesl.ea.com
+  answer: "192.0.2.10"

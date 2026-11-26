@@ -21,6 +21,7 @@
   <a href="#dns-redirects">DNS redirects</a> ·
   <a href="#running-the-server">Running the server</a> ·
   <a href="docs/games/nascar04/online-map.md">NASCAR 04 notes</a> ·
+  <a href="docs/games/gera/online-map.md">GoldenEye notes</a> ·
   <a href="#credits">Credits</a>
 </p>
 
@@ -41,6 +42,8 @@
 | Inbox replay, account recovery and relay ownership | 🧪 covered by automated tests |
 | Physical consoles, other disc regions and Internet NAT combinations | 🧪 awaiting wider testing |
 | Relay for EA SPORTS Talk | Unimplemented |
+
+**GoldenEye: Rogue Agent** (US PS2, `SLUS-21064`) has an early `gera` adapter. It negotiates the SSL 2.0 handshake the client expects, then frames FESL messages and answers `fsys` Hello on TCP 18040. It has not been tested in game yet, and accounts, the game browser and Messenger are not implemented. See the [GoldenEye notes](docs/games/gera/online-map.md).
 
 The client owns race simulation. The server handles accounts, rooms, Messenger, peer setup, and ranked statistics. Message history is restored after the client loads its buddy and ignore lists. The game can display restored messages as unread again.
 
@@ -64,7 +67,16 @@ Point `ps2nascar04.ea.com` at the IPv4 address your PS2 or PCSX2 clients use to 
 address=/ps2nascar04.ea.com/192.0.2.10
 ```
 
-Replace `192.0.2.10` with your server address. The line above is for dnsmasq. Use [configs/nascar04.dns.yaml](configs/nascar04.dns.yaml) for revive-dns. Configure the PS2 network profile or PCSX2 to use your resolver and keep DNAS routing configured separately.
+Replace `192.0.2.10` with your server address. The line above is for dnsmasq. Use [configs/nascar04.dns.yaml](configs/nascar04.dns.yaml) for revive-dns.
+
+For GoldenEye: Rogue Agent, add `gera` to `REI_NATION_GAMES` and point both FESL names at the server. Use [configs/gera.dns.yaml](configs/gera.dns.yaml) for revive-dns.
+
+```text
+address=/gera.en_US.fesl.ea.com/192.0.2.10
+address=/gera.fesl.ea.com/192.0.2.10
+```
+
+Configure the PS2 network profile or PCSX2 to use your resolver and keep DNAS routing configured separately.
 
 ## Running the server
 

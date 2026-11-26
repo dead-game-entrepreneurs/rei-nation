@@ -17,6 +17,9 @@ type Definition struct {
 	AuxTCP  []uint16
 	UDP     []uint16
 	New     func(Options) Runtime
+	// Serve runs the main TCP listener. Nil uses aries.Serve. A title sets it
+	// when its clients expect a different keepalive or idle limit.
+	Serve func(context.Context, net.Listener, aries.Handler) error
 }
 
 type Runtime interface {
