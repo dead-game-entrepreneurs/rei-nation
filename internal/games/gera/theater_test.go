@@ -157,6 +157,9 @@ func TestTheaterBrowserEntry(t *testing.T) {
 	if ldat.Service != "LDAT" {
 		t.Fatalf("expected LDAT, got %s", ldat.Service)
 	}
+	if v, _ := ldat.Get("FAVORITE-PLAYERS"); v == "0" || v == "" {
+		t.Fatalf("LDAT FAVORITE-PLAYERS = %q; the client hosts only in a lobby where it is non-zero", v)
+	}
 	if v, _ := ldat.Get("NAME"); v != lobbyName {
 		t.Fatalf("LDAT NAME = %q", v)
 	}

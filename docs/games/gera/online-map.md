@@ -142,7 +142,7 @@ has no relay or internet NAT traversal.
 | --- | --- | --- |
 | `CONN` | Protocol negotiation. | Live. |
 | `USER` | Authenticate with the login `lkey`. | Live. |
-| `LLST`/`LDAT` | One lobby, named `NorthAmerica`. The client hosts only in a lobby whose name matches its region string; any other name makes it fail with `nrom` and never send `CGAM`. | Live. |
+| `LLST`/`LDAT` | One lobby, named `NorthAmerica` with `FAVORITE-PLAYERS=1`. Depending on its mode the client hosts only in a lobby whose name matches its region string, or whose `FAVORITE-PLAYERS` is non-zero; otherwise it fails with `nrom` and never sends `CGAM`. | Live. |
 | `CGAM` | Host a game; reply carries GID and a UDP secret. | Implemented. |
 | `GLST`/`GDAT`/`GDET`/`PDAT` | List games and their details. | Implemented. |
 | `EGAM`→`EGRQ` | Join request, forwarded to the host. | Implemented. |
