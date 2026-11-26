@@ -157,7 +157,7 @@ func TestTheaterBrowserEntry(t *testing.T) {
 	if ldat.Service != "LDAT" {
 		t.Fatalf("expected LDAT, got %s", ldat.Service)
 	}
-	if v, _ := ldat.Get("NAME"); v != "Local" {
+	if v, _ := ldat.Get("NAME"); v != lobbyName {
 		t.Fatalf("LDAT NAME = %q", v)
 	}
 

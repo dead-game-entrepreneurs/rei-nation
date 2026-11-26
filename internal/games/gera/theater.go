@@ -181,10 +181,17 @@ func (h *theater) user(c *aries.Client, m fesl.Message, tid string) {
 	c.Send(fesl.Packet("USER", msgOK, field("TID", tid), field("NAME", id.personaName)))
 }
 
+// lobbyName is the lobby the client will host and join in. After the lobby
+// list arrives, the client's online manager (FUN_00338920) scans for a lobby
+// whose NAME equals its region string from FUN_00331a98: "NorthAmerica" on
+// this disc ("Asia" otherwise). With no match it records error 'nrom' and never
+// sends CGAM, so the host times out after the level loads.
+const lobbyName = "NorthAmerica"
+
 func (h *theater) lobbyList(c *aries.Client, tid string) {
 	c.Send(fesl.Packet("LLST", msgOK, field("TID", tid), field("NUM-LOBBIES", "1")))
 	c.Send(fesl.Packet("LDAT", msgOK,
-		field("TID", tid), field("LID", "1"), field("NAME", "Local"), field("PASSING", "1"),
+		field("TID", tid), field("LID", "1"), field("NAME", lobbyName), field("PASSING", "1"),
 		field("FAVORITE-GAMES", "0"), field("FAVORITE-PLAYERS", "0"), field("LOCALE", "en_US"),
 		field("MAX-GAMES", "100"), field("NUM-GAMES", "0"),
 	))
