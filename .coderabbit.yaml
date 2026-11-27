@@ -1,0 +1,84 @@
+# yaml-language-server: $schema=https://www.coderabbit.ai/integrations/schema.v2.json
+language: en-US
+
+reviews:
+  profile: assertive
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+  auto_approvals:
+    enabled: false
+  path_instructions:
+    - path: "**/*.go"
+      instructions: |
+        Follow AGENTS.md and check the ordinary entry point. Flag concrete
+        correctness, compatibility, security, and test gaps. Prefer idiomatic
+        Go, clear ownership, small interfaces at existing boundaries, wrapped
+        errors where context matters, bounded I/O, and cancellation and cleanup
+        on every exit path. Check races, lock order, and concurrent shutdown.
+        Reuse a shared package when its contract already fits. Keep packet and
+        game policy in the title adapter. Extract new shared code for real
+        callers with the same behavior and a testable contract.
+    - path: "{cmd/**,internal/{app,game,protocol,connectivity,storage,games}/**}"
+      instructions: |
+        Check input and frame bounds, session and title authorization, safe
+        defaults, and redacted logs. Legacy transport is scoped to clients that
+        require it. Flag credentials or keys in code, fixtures, or logs.
+        For persistence changes, check parameterized queries, upgrade compatibility,
+        transaction boundaries, and duplicate or retried writes.
+    - path: "{cmd/**,internal/{app,game,connectivity,protocol,games}/**,configs/**,compose.yaml,.env.example,README.md,docs/games/**}"
+      instructions: |
+        For new title support or changes that affect peer connectivity, check
+        the actual client handoff and report the relay options it supports.
+        Distinguish direct play, relay selected before handoff, client-driven
+        fallback within an attempt, and a fresh attempt routed through a relay.
+        A relay listener, a successful probe, or a mode named auto establishes
+        no fallback on its own. Check which endpoint fields the client consumes,
+        the specific retry or alternate-endpoint path, and evidence from traces,
+        client code, or focused tests. Check both a working direct path and a
+        blocked-direct test with the relay reachable when fallback is claimed.
+        Flag unsupported or unverified outcomes in status claims.
+        When the stock client lacks fallback, identify feasible routes such
+        as an initial relay handoff and explain the client limitation.
+        For forwarding changes, check admitted peers, expected source and
+        destination ports, same-IP behavior, expiry, and failure cleanup.
+    - path: "{.env.example,compose.yaml,Dockerfile,configs/**,.github/workflows/**,scripts/**}"
+      instructions: |
+        Check that changed settings agree across code, Compose, and the README.
+        Verify client-facing listener and DNS changes use documentation examples.
+        Check localhost-only database and health exposure, least privilege,
+        credential handling, and isolation of test stacks from live services.
+  pre_merge_checks:
+    custom_checks:
+      - name: Relay support and evidence
+        mode: warning
+        instructions: |
+          Apply this check when the PR adds a title or changes the peer handoff,
+          NAT traversal, or relay behavior. Pass other changes as not applicable.
+          For an applicable PR, pass if its description or changed title notes
+          identify the supported modes and report evidence or explicitly mark
+          unknown or untested behavior. If it claims adaptive relay, require
+          evidence of how the stock client selects an alternate after direct
+          failure in the same attempt, and a reported outcome for direct and
+          blocked-direct cases or an explicit pending test status. Fail if the
+          relay assessment is missing or if the status claims support beyond
+          the evidence. Name the title and the missing evidence.
+  tools:
+    golangci-lint:
+      enabled: true
+    gitleaks:
+      enabled: true
+    semgrep:
+      enabled: true
+    trivy:
+      enabled: true
+    actionlint:
+      enabled: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - files: "docs/games/nascar04/online-map.md"
+        applyTo: "internal/games/nascar04/**"
