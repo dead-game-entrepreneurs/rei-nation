@@ -48,7 +48,8 @@ almost any NAT.
    [compose.yaml](../../../compose.yaml). Set
    `REI_NATION_GERA_RELAY_DIR=/gera-relay` and set
    `REI_NATION_GERA_RELAY_HOST_DIR` to the host directory that
-   `rei-relay setup` wrote. That directory is mounted read-only.
+   `rei-relay setup` wrote. That directory is mounted read-only and must be
+   readable by UID 65534; see [Relay](#relay).
 6. Open these ports to the players:
 
    | Port | Protocol | Service |
@@ -84,8 +85,15 @@ work. A small cloud VM is enough.
    `relay/tokens.txt` and `relay/relay1-token.txt`. Keep the directory out
    of version control (it is in `.gitignore`). Node names may use 1 to 32
    ASCII letters, digits, `.`, `_` and `-`.
-2. Set `REI_NATION_GERA_RELAY_DIR=relay` and restart the server. Open
-   **TCP 18043** to the node's IP; nodes sign in there over TLS.
+2. Point the server at the directory and restart it. For a direct binary
+   run, set `REI_NATION_GERA_RELAY_DIR=relay`. With Docker Compose, set
+   `REI_NATION_GERA_RELAY_DIR=/gera-relay` and
+   `REI_NATION_GERA_RELAY_HOST_DIR` to the host path of `relay`. The container
+   runs as UID 65534, and setup writes `tokens.txt` and `control-key.pem` as
+   0600 in a 0700 directory, so give that user the directory:
+   `sudo chown -R 65534:65534 relay`. Otherwise the server logs
+   `relay hub not started` and runs without the relay. Open **TCP 18043** to
+   the node's IP; nodes sign in there over TLS.
 3. Copy `control-cert.pem` and `relay1-token.txt` to the node, delete the
    token file on the server, and run:
 
@@ -109,8 +117,9 @@ How a join uses the relay (logged as `relay decision`):
 - **Forced relay**: personas in `REI_NATION_GERA_RELAY_FORCE` (or every join
   with `*`) are always relayed, including on a shared public IP. The relay is
   chosen before the handoff. If no relay is configured or connected, the join
-  is refused with `EGAM jden` and logged, rather than sent direct. How the game
-  words that refusal is untested.
+  is refused with `EGAM jden` and logged, rather than sent direct. If the
+  relay room then cannot be opened, the attempt ends with a declined `EGEG`
+  and the host never sees it. How the game words either refusal is untested.
 - **Relay after a failed join**: a joiner whose last direct join failed
   (approved but left without entering within 30 seconds) gets relay addresses.
   That memory lasts 24 hours and is lost on restart.

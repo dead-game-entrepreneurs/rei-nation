@@ -204,5 +204,17 @@ func TestValidNodeName(t *testing.T) {
 func (h *Hub) sawFailedAuth() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return len(h.failures) > 0
+	for _, attempts := range h.failures {
+		if len(attempts) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRoomIDsDifferAcrossHubs(t *testing.T) {
+	a, b := newHub(nil, nil, quiet()), newHub(nil, nil, quiet())
+	if a.generation == "" || a.generation == b.generation {
+		t.Fatalf("hub generations %q and %q", a.generation, b.generation)
+	}
 }

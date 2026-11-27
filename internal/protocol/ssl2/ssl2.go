@@ -72,8 +72,10 @@ type Conn struct {
 	hsOnce sync.Once
 	hsErr  error
 
-	deadlineMu   sync.Mutex
-	readDeadline time.Time // the caller's, restored after the handshake
+	// The caller's deadlines, restored after the handshake replaces them.
+	deadlineMu    sync.Mutex
+	readDeadline  time.Time
+	writeDeadline time.Time
 
 	readMu   sync.Mutex
 	writeMu  sync.Mutex
@@ -89,15 +91,22 @@ type Conn struct {
 // SetReadDeadline records the caller's deadline so the handshake can restore it.
 func (c *Conn) SetReadDeadline(t time.Time) error {
 	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
 	c.readDeadline = t
-	c.deadlineMu.Unlock()
 	return c.Conn.SetReadDeadline(t)
+}
+
+func (c *Conn) SetWriteDeadline(t time.Time) error {
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+	c.writeDeadline = t
+	return c.Conn.SetWriteDeadline(t)
 }
 
 func (c *Conn) SetDeadline(t time.Time) error {
 	c.deadlineMu.Lock()
-	c.readDeadline = t
-	c.deadlineMu.Unlock()
+	defer c.deadlineMu.Unlock()
+	c.readDeadline, c.writeDeadline = t, t
 	return c.Conn.SetDeadline(t)
 }
 
@@ -280,9 +289,9 @@ func (c *Conn) doHandshake() (err error) {
 		return err
 	}
 
-	c.Conn.SetWriteDeadline(time.Time{})
 	c.deadlineMu.Lock()
 	c.Conn.SetReadDeadline(c.readDeadline)
+	c.Conn.SetWriteDeadline(c.writeDeadline)
 	c.deadlineMu.Unlock()
 	c.trace("SSL handshake complete")
 	return nil

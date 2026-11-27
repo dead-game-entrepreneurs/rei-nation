@@ -3,6 +3,7 @@ package relay
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -50,6 +51,9 @@ type Hub struct {
 	measured map[netip.Addr]bool
 	rooms    map[string]*Room
 	failures map[netip.Addr][]time.Time
+	// generation prefixes room IDs so a restarted hub never reuses a room a
+	// node still holds from before the restart.
+	generation string
 }
 
 type latencyKey struct {
@@ -107,7 +111,8 @@ func LoadHub(dir string, log *slog.Logger) (*Hub, error) {
 
 func newHub(tokens map[string]tokenEntry, conf *tls.Config, log *slog.Logger) *Hub {
 	return &Hub{log: log, tokens: tokens, tls: conf, links: map[string]*link{}, latency: map[latencyKey]latencyEntry{},
-		measured: map[netip.Addr]bool{}, rooms: map[string]*Room{}, failures: map[netip.Addr][]time.Time{}}
+		measured: map[netip.Addr]bool{}, rooms: map[string]*Room{}, failures: map[netip.Addr][]time.Time{},
+		generation: rand.Text()[:12]}
 }
 
 func (h *Hub) id() string {
@@ -500,7 +505,7 @@ func (h *Hub) OpenRoom(ctx context.Context, members map[string]netip.AddrPort, a
 		return nil
 	}
 	h.nextID++
-	room := &Room{ID: strconv.Itoa(h.nextID), IP: l.ip, label: label, link: l, ports: map[string]int{}, ips: map[string]netip.Addr{}}
+	room := &Room{ID: h.generation + "-" + strconv.Itoa(h.nextID), IP: l.ip, label: label, link: l, ports: map[string]int{}, ips: map[string]netip.Addr{}}
 	h.rooms[room.ID] = room
 	h.mu.Unlock()
 	h.log.Info("relay choice", "match", label, "room", room.ID, "node", l.name)

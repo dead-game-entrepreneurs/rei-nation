@@ -96,14 +96,27 @@ func dialHandler(t *testing.T, s *server) (*aries.Frame, net.Conn, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// One deadline covers the whole test; bcrypt under -race needs several seconds.
-	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	conn = &perCallDeadline{Conn: conn}
 	return nil, conn, func() {
 		conn.Close()
 		cancel()
 		<-done
 		ln.Close()
 	}
+}
+
+// perCallDeadline bounds each read and write separately, so slow bcrypt calls
+// under -race do not use up the time of later requests.
+type perCallDeadline struct{ net.Conn }
+
+func (c *perCallDeadline) Read(p []byte) (int, error) {
+	c.Conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	return c.Conn.Read(p)
+}
+
+func (c *perCallDeadline) Write(p []byte) (int, error) {
+	c.Conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	return c.Conn.Write(p)
 }
 
 func TestAccountFlow(t *testing.T) {

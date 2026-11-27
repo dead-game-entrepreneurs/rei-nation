@@ -541,19 +541,29 @@ func (h *theater) enterGame(c *aries.Client, m fesl.Message, tid string) {
 	}
 	switch {
 	case mode == "relay":
-		// EGRQ waits for the room so the host's probes find the relay port
-		// already open; without a room the join goes ahead direct.
+		// EGRQ waits for the room so the host's probes find the relay port open.
+		// Without a room a forced join ends; any other join goes ahead direct.
+		forced := strings.HasPrefix(reason, "forced_")
 		go func() {
 			room := h.roomMember(g, pid, relayEP, nil)
 			address := ext
 			h.mu.Lock()
 			_, still := g.pending[pid]
+			still = still && h.games[gid] == g
 			if room != nil && still {
 				if ep, ok := h.srv.relays.Port(room, strconv.Itoa(pid)); ok {
 					// The host reaches the joiner at its relay port.
 					joiner.relayed = true
 					address = addr{ep.Addr().String(), int(ep.Port())}
 				}
+			}
+			if still && forced && !joiner.relayed {
+				delete(g.pending, pid)
+				h.releaseRelay(g, pid)
+				h.sendJoinAnswer(c, c, false, lid, gid, pid, "", "1", addr{"0.0.0.0", 0}, addr{"0.0.0.0", 0}, false)
+				h.mu.Unlock()
+				h.srv.opts.Log.Warn("theater join refused: forced relay room unavailable", "gid", gid, "pid", pid)
+				return
 			}
 			if !joiner.relayed {
 				joiner.relayMode = ""
