@@ -166,7 +166,7 @@ func (f *fesl) topStats(ctx context.Context, v map[string]string, allTime, extra
 	}
 	rowLimit := min(16, last-first+1)
 	// Keep worst-case detail fields below the FESL reply fragmentation budget.
-	if len(keys)*rowLimit > 384 {
+	if len(keys)*rowLimit > 200 {
 		return failure("21")
 	}
 	rows, err := f.ranking.TSFPTop(ctx, key, first-1, rowLimit)

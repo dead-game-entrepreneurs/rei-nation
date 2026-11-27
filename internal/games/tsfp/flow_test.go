@@ -58,14 +58,33 @@ func TestFESLFragments(t *testing.T) {
 func TestRankFragmentBudget(t *testing.T) {
 	pairs := []string{"stats.[]", "16"}
 	for i := range 16 {
-		for j := range 24 {
-			prefix := "stats." + strconv.Itoa(i) + ".addStats." + strconv.Itoa(j) + "."
-			pairs = append(pairs, prefix+"key", "S_123456789", prefix+"value", "123456789012345678901234.1234",
-				prefix+"text", strings.Repeat("x", 512))
+		prefix := "stats." + strconv.Itoa(i) + "."
+		pairs = append(pairs, prefix+"key", "S_123456789", prefix+"value", "123456789012345678901234.1234",
+			prefix+"rank", strconv.Itoa(i+1), prefix+"text", strings.Repeat("%", 512),
+			prefix+"owner", "2147483647", prefix+"name", strings.Repeat("P", 32))
+		for j := range 12 {
+			detail := prefix + "addStats." + strconv.Itoa(j) + "."
+			pairs = append(pairs, detail+"key", "S_123456789", detail+"value", "123456789012345678901234.1234",
+				detail+"text", strings.Repeat("%", 512))
 		}
 	}
 	if frames := feslFrames(packet("rank"), pairs...); len(frames) > 240 {
 		t.Fatalf("maximum admitted ranking reply needs %d fragments", len(frames))
+	}
+}
+
+func TestRelayProbeTargetChangeClearsStaleReachability(t *testing.T) {
+	theater := newTheater(&loginKeys{keys: make(map[string]sessionKey)}, netip.MustParseAddr("127.0.0.22"), "auto")
+	for range cap(theater.probeSlots) {
+		theater.probeSlots <- struct{}{}
+	}
+	old := netip.MustParseAddrPort("198.51.100.10:3000")
+	current := netip.MustParseAddrPort("203.0.113.20:3000")
+	game := &match{external: current, relayProbeAddr: old, relayProbedAt: time.Now(), relayReachable: true}
+	theater.probeRelay(game)
+	if game.relayReachable || game.relayProbeAddr != current || !game.relayProbedAt.IsZero() {
+		t.Fatalf("stale probe survived target change: reachable=%v target=%s probed=%s",
+			game.relayReachable, game.relayProbeAddr, game.relayProbedAt)
 	}
 }
 

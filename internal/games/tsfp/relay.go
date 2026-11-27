@@ -112,13 +112,15 @@ func (t *theater) probeRelay(g *match) {
 	if g.relayProbeAddr == target && time.Since(g.relayProbedAt) < 5*time.Minute {
 		return
 	}
+	if g.relayProbeAddr != target {
+		g.relayReachable = false
+		g.relayProbeAddr = target
+		g.relayProbedAt = time.Time{}
+	}
 	select {
 	case t.probeSlots <- struct{}{}:
 	default:
 		return
-	}
-	if g.relayProbeAddr != target {
-		g.relayReachable = false
 	}
 	g.relayProbeAddr, g.relayProbedAt = target, time.Now()
 	probed := g.relayProbedAt
@@ -127,7 +129,7 @@ func (t *theater) probeRelay(g *match) {
 		ok := relayProbe(t.relayIP, target)
 		t.mu.Lock()
 		defer t.mu.Unlock()
-		if t.games[g.id] == g && g.relayProbedAt == probed {
+		if t.games[g.id] == g && g.relayProbeAddr == target && g.relayProbedAt == probed {
 			g.relayReachable = ok
 		}
 	}()
