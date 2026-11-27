@@ -32,6 +32,11 @@ a mechanism across repos. For example, NASCAR 04 selects one peer endpoint befor
 the race, so its relay decision belongs in the NASCAR adapter. Record the source
 and preserve applicable notices when adapting code from another project.
 
+Prefer adaptive relay for Internet play when the stock client can switch after
+a direct failure. If the client lacks that path, provide a forced relay option
+for Internet play and document how to enable it. Explain client limitations
+that rule out either approach and identify which routes have been verified.
+
 ## Work from client evidence
 
 1. Identify the title, region, disc revision, and menu action. Trace the ordinary
@@ -67,6 +72,10 @@ and OpenSSL for changes to PostgreSQL, listeners, or flows that cross services.
 It starts its own loopback Compose project and database. Keep the live stack
 available while testing changes. Coordinate any restart with the person running
 the console test.
+
+Keep new and edited handwritten code comments to at most two lines. Explain
+why the code is needed or what constraint it preserves. Put longer explanations
+in the title's notes and link to them from the code.
 
 Update [`.env.example`](.env.example), [`compose.yaml`](compose.yaml), and the
 [README](README.md) when an operator-facing setting changes. Put title DNS
