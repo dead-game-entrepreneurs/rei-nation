@@ -117,18 +117,33 @@ Right after persona login the client opens the messenger on `messengerPort`
 Aries framing in plaintext (no SSL), with the command in the frame tag and a
 four-character status in the code word. Implemented in `messenger.go`.
 
+The client's messenger tag table (built near `0x4c5944`) lists `AUTH`, `DISC`,
+`USCH`, `USER`, `PADD`, `PDEL`, `PSET`, `PGET`, `RADD`, `RADM`, `RRSP`, `RDEL`,
+`RDEM`, `RNOT`, `RGET`, `ROST`, `MLST`, `TCKL`, `GINV`, `GRSP`, `GRVK`, `GNOT`,
+`SEND`, `RECV`, `BRDC`, `EPST`, `EPGT`, `ADMN` and `PING`. The field names in
+its string table (`USER`, `DOMN`, `RSRC`, `SHOW`, `STAT`, `GROUP`, `CHNG`,
+`ATTR`, `TYPE`, `SUBJ`, `BODY`, `NOREPLY`, ...) match the TimeSplitters build of
+the same library, so the roster rules below follow that server. None of the
+buddy-list flow has been tried on a console yet.
+
 | Command | Purpose | Status |
 | --- | --- | --- |
 | `AUTH` | Present the login `lkey`; reply carries `USER` (persona). | Live. |
-| `PSET` | Set presence. | Acknowledged. |
+| `PSET` | Set presence. The first one marks the connection ready; friends get `PGET`, then queued messages are delivered. | Synthetic test. |
 | `PING` | Keepalive. | Acknowledged. |
-| `RGET` | Roster. | Empty until buddy lists are stored. |
-| `USCH` | Persona search. | Empty for now. |
-| `DISC` | Disconnect. | Closes the socket. |
+| `RGET` | Roster: `SIZE`, then one `ROST` per friend (`ATTR` `S` friend, `R` request received, `T` request sent). `PEND=Y` includes requests; `PRES=Y` adds `PGET` for online friends. The ignore list (`LIST=I`) is returned empty, as TimeSplitters does. | Synthetic test. |
+| `USCH` | Persona search by prefix, up to 20 `USER` replies. | Synthetic test. |
+| `RADM` | Friend request. Both sides get `RNOT CHNG=A`. A request to someone who already asked accepts it. | Synthetic test. |
+| `RRSP` | Answer a request (`ANSW=Y` accepts). The pending entry is removed with `CHNG=D` before the friend is added, because the client ORs flags into an existing entry. | Synthetic test. |
+| `RDEL`, `RDEM` | Remove a friend. `RNOT CHNG=D` only for a friendship that existed. | Synthetic test. |
+| `RADD`/`RDEL` with `LIST=I` | Block and unblock. A block also ends the friendship. | Synthetic test. |
+| `PADD`, `PDEL` | Watch a friend's presence; `PADD` answers with `PGET`. | Synthetic test. |
+| `SEND`, `BRDC` | Message (`TYPE` `C` or `A`, `SUBJ` up to 31 bytes, `BODY` up to 255). Stored, then delivered as `RECV` to a ready connection and removed. | Synthetic test. |
+| `DISC` | Disconnect. Friends get `PGET SHOW=DISC` when the persona's last connection closes. | Synthetic test. |
+| `EPGT`, `EPST`, `GINV` and the rest | Acknowledged with an empty reply. `EPGT` is sent at sign-in. | `EPGT` live. |
 
-Open: buddy lists, presence broadcast, and messages are not stored yet. The
-connection has no server keepalive and a long idle timeout; a dropped console
-lingers until it expires.
+Friendships live in `eanation.buddies` under title `gera` and messages in
+`eanation.mailbox`; NASCAR 04 rows are separate.
 
 ## Theater (game browser)
 
@@ -169,11 +184,21 @@ played on 2026-11-26.
 - Static: `GameSpyPreAuth` returns a `ticket` for a GameSpy match browser. Not
   implemented; may not be needed when the EA theater carries the browser.
 - Static: ProtoMangle at `demangler.ea.com` with game feature `gera-ps2-2004`.
-- `rank`: the host asks for `GetRankedStats` when it enters its match. Answered
-  in `rank.go` the way the TimeSplitters server does: `GetSessionId` returns a
-  session ID; `StartReport`, `EndReport`, `AddGameInfo` and `UpdateStats` are
-  accepted and discarded; stats reads (`GetStats`, `GetRankedStats`, `GetTopN`,
-  `GetTopNAndStats`) return an empty `stats.[]`; anything else gets an error
-  reply so a screen does not wait out its timeout. Stats are not stored yet.
+- `rank`: the host asks for `GetRankedStats` when it enters its match. The
+  string table has the same rank fields as TimeSplitters (`u.%d.o`, `u.%d.ot`,
+  `u.%d.s.%d.k/v/ut/t`, `keys.%d`, `minRank`, `maxRank`, `periodId`,
+  `periodPast`, `stats.%d.key/value/rank/text/owner/name` and
+  `stats.%d.addStats.%d.*`). `rank.go` stores persona stats in
+  `eanation.player_stats`: `UpdateStats` adds the value for update type 3 (what
+  TimeSplitters sends after a match) and replaces it for type 0 (assumed); other
+  types, and owners other than the signed-in persona, are logged and skipped.
+  `GetStats` and `GetRankedStats` return each requested key with its
+  competition rank (highest first, 0 when the persona has no value);
+  `GetTopN` and `GetTopNAndStats` return up to 16 rows, the client's capacity in
+  the shared library. Periods are ignored: every board is all-time. Which keys
+  GoldenEye reports, and whether a lower value should rank higher for any of
+  them, still needs a live match; each report is logged with its keys and
+  update types. `GetDateRange` gets an error reply so the screen does not wait
+  out its timeout.
 - Static: `acct GetAccount` backs the account screen. Not implemented.
 - Static: EA voice chat through `VOIPF.IRX`.

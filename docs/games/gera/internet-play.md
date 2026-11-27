@@ -100,9 +100,10 @@ Treat this as a test service.
   `gera-ps2-2004`), which this title does not serve yet. Gameplay does not
   depend on it. NASCAR 04's demangler uses the same port, so the two titles
   cannot both serve it from one process as things stand.
-- Stats and leaderboards are answered with empty results and nothing is
-  stored. Messenger buddy lists are not stored. The account screen
-  (`acct GetAccount`) is not answered.
+- Stats, leaderboards and buddy lists are stored but have only synthetic
+  tests so far. Players report their own stats, so leaderboards can be
+  faked by a modified client. The account screen (`acct GetAccount`) is not
+  answered.
 - After a match without map rotation the host returns to the online menu and
   the joiner sees "Your connection to the game session has been lost". The
   joiner raises this itself when its session with the host is gone at the

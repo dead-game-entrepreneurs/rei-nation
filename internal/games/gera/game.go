@@ -48,6 +48,8 @@ func Definition() game.Definition {
 		New: func(opts game.Options) game.Runtime {
 			s := &server{opts: opts, sessions: make(map[*aries.Client]*account), keys: make(map[string]identity)}
 			s.store, _ = opts.Store.(storage.IdentityStore)
+			s.stats, _ = opts.Store.(storage.StatsStore)
+			s.social, _ = opts.Store.(socialStore)
 			s.messenger = &messenger{srv: s, sessions: make(map[*aries.Client]*presence)}
 			s.theater = &theater{srv: s, sessions: make(map[*aries.Client]*theaterSession),
 				games: make(map[int]*hostedGame), connIP: make(map[*aries.Client]string),
@@ -77,6 +79,8 @@ type server struct {
 	key       *rsa.PrivateKey
 	certErr   error
 	store     storage.IdentityStore
+	stats     storage.StatsStore
+	social    socialStore
 	messenger *messenger
 	theater   *theater
 
@@ -164,7 +168,7 @@ func (s *server) Handle(ctx context.Context, c *aries.Client, f aries.Frame) {
 	case "acct":
 		s.handleAcct(ctx, c, m)
 	case "rank":
-		s.handleRank(c, m)
+		s.handleRank(ctx, c, m)
 	default:
 		s.opts.Log.Info("unhandled FESL service", "conn", c.ID(), "service", m.Service, "txn", m.TXN)
 	}
