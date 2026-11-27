@@ -210,8 +210,18 @@ func (n *Node) control(ctx context.Context, config Config, tlsConfig *tls.Config
 	if err := write(message{Op: "hello", Token: token, Name: config.Name, PublicIP: config.PublicIP.String()}); err != nil {
 		return err
 	}
-	config.Log.Info("relay control connected", "server", config.Server, "rooms", n.roomCount())
 	reader := bufio.NewReaderSize(conn, 4096)
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	line, err := reader.ReadSlice('\n')
+	if err != nil {
+		return fmt.Errorf("relay hello was not accepted: %w", err)
+	}
+	var ready message
+	if json.Unmarshal(line, &ready) != nil || ready.Op != "ready" {
+		return errors.New("relay hello was not accepted")
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+	config.Log.Info("relay control connected", "server", config.Server, "rooms", n.roomCount())
 	for {
 		line, err := reader.ReadSlice('\n')
 		if err != nil {

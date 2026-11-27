@@ -129,6 +129,11 @@ PostgreSQL and `/healthz` bind to the host loopback interface on ports `55434` a
 The image includes the TSFP FESL certificate and key under `/tsfp-certs`, so
 Compose does not need a certificate volume. Direct binary runs can override the
 paths with `REI_NATION_TSFP_CERT` and `REI_NATION_TSFP_KEY`.
+Because direct binary runs also select both games by default, they must point
+those variables at readable certificate files (for a source checkout, use
+`configs/tsfp-certs/fesl-cert.pem` and `configs/tsfp-certs/fesl-key.pem`). An
+existing NASCAR-only binary deployment can instead keep its previous behavior
+with `REI_NATION_GAMES=nascar04`.
 
 ### Relay
 

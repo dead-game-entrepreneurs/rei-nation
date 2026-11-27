@@ -223,6 +223,9 @@ func (h *remoteRelayHub) accept(ctx context.Context, conn net.Conn) {
 	if old != nil {
 		old.close()
 	}
+	if err := link.send(relayControlMessage{Op: "ready"}); err != nil {
+		return
+	}
 	h.log.Info("TSFP relay connected", "name", short(hello.Name, 32), "ip", h.ip)
 	defer func() {
 		link.close()
