@@ -22,11 +22,13 @@ import (
 const (
 	// ownerPersona is the rank owner type for a persona.
 	ownerPersona = 1
-	// updateAdd accumulates the reported value, as TimeSplitters does after each
-	// match. updateSet is assumed to replace it.
-	updateSet   = 0
-	updateAdd   = 3
-	maxStatKeys = 64
+	// updateAdd accumulates the reported value. GoldenEye sends it for most
+	// match totals and updateReplace for current loss streaks, which reset, so
+	// 5 is taken to replace the value. updateSet (0) is assumed to replace too.
+	updateSet     = 0
+	updateAdd     = 3
+	updateReplace = 5
+	maxStatKeys   = 64
 	// The client keeps 16 leaderboard rows (0x780 bytes of 0x78-byte entries in
 	// the shared library).
 	maxBoardRows = 16
@@ -88,29 +90,37 @@ func (s *server) updateStats(ctx context.Context, c *aries.Client, m fesl.Messag
 		s.acctError(c, m, errMissingField)
 		return
 	}
-	var updates []storage.StatUpdate
-	var logged []string
+	type report struct {
+		owner   int64
+		updates []storage.StatUpdate
+	}
+	var reports []report
+	total := 0
 	for i := 0; i < owners; i++ {
 		prefix := "u." + strconv.Itoa(i)
 		kind, _ := intField(m, prefix+".ot", 0, 0, 65535)
 		owner, _ := intField(m, prefix+".o", 0, 0, 1<<31-1)
 		count, ok := intField(m, prefix+".s.[]", 0, 0, maxStatKeys)
-		if !ok || len(updates)+count > maxStatKeys {
+		total += count
+		if !ok || total > maxStatKeys {
 			s.acctError(c, m, errMissingField)
 			return
 		}
-		if kind != ownerPersona || int64(owner) != a.personaID {
-			// Club or other owners have no persona to credit; keep the rest.
-			s.opts.Log.Info("rank update skipped owner", "conn", c.ID(), "owner_type", kind, "stats", count)
+		// The host reports its guests' results along with its own, so a guest
+		// admitted to one of the reporter's games may be credited too.
+		if kind != ownerPersona || (int64(owner) != a.personaID && !s.theater.hostedGuest(a.personaID, int64(owner))) {
+			s.opts.Log.Info("rank update skipped owner", "conn", c.ID(), "owner_type", kind, "owner", owner, "stats", count)
 			continue
 		}
+		r := report{owner: int64(owner)}
+		var logged []string
 		for j := 0; j < count; j++ {
 			sp := prefix + ".s." + strconv.Itoa(j)
 			key, _ := m.Get(sp + ".k")
 			value, _ := m.Get(sp + ".v")
-			ut, _ := intField(m, sp+".ut", 0, 0, 255)
+			ut, _ := intField(m, sp+".ut", -1, 0, 255)
 			logged = append(logged, key+"/"+strconv.Itoa(ut))
-			if !statKey.MatchString(key) || !statValue.MatchString(value) || (ut != updateAdd && ut != updateSet) {
+			if !statKey.MatchString(key) || !statValue.MatchString(value) || (ut != updateAdd && ut != updateSet && ut != updateReplace) {
 				s.opts.Log.Info("rank update skipped stat", "conn", c.ID(), "key", key, "update_type", ut)
 				continue
 			}
@@ -121,18 +131,60 @@ func (s *server) updateStats(ctx context.Context, c *aries.Client, m fesl.Messag
 				}
 				u.Text = &text
 			}
-			updates = append(updates, u)
+			r.updates = append(r.updates, u)
 		}
+		s.opts.Log.Info("rank update", "conn", c.ID(), "reporter", a.personaID, "owner", owner, "stats", logged)
+		reports = append(reports, r)
 	}
-	s.opts.Log.Info("rank update", "conn", c.ID(), "persona_id", a.personaID, "stats", logged)
-	if len(updates) > 0 {
-		if err := s.stats.UpdateStats(ctx, gameKey, a.personaID, updates); err != nil {
+	for _, r := range reports {
+		if len(r.updates) == 0 {
+			continue
+		}
+		if err := s.stats.UpdateStats(ctx, gameKey, r.owner, r.updates); err != nil {
 			s.opts.Log.Error("rank update failed", "conn", c.ID(), "error", err)
 			s.acctError(c, m, errServer)
 			return
 		}
+		if err := s.deriveStats(ctx, r.owner, r.updates); err != nil {
+			s.opts.Log.Error("rank derived stats failed", "conn", c.ID(), "error", err)
+		}
 	}
 	c.Send(fesl.Reply(m, m.TXN))
+}
+
+// deriveStats keeps the stats the client reads but never reports. For each
+// mode prefix P with reported wins (P_W) or games (P_T_G), P_W_PERC is the
+// win percentage (0 to 100) and P_RANK, which orders the leaderboards, is the
+// win count. The original service's ranking formula is unknown.
+func (s *server) deriveStats(ctx context.Context, owner int64, updates []storage.StatUpdate) error {
+	prefixes := map[string]bool{}
+	for _, u := range updates {
+		for _, suffix := range []string{"_W", "_T_G"} {
+			if p, ok := strings.CutSuffix(u.Key, suffix); ok && p != "" {
+				prefixes[p] = true
+			}
+		}
+	}
+	var derived []storage.StatUpdate
+	for p := range prefixes {
+		_, values, err := s.stats.PersonaStats(ctx, gameKey, owner, []string{p + "_W", p + "_T_G"})
+		if err != nil || len(values) != 2 {
+			return err
+		}
+		wins, _ := strconv.ParseFloat(values[0].Value, 64)
+		games, _ := strconv.ParseFloat(values[1].Value, 64)
+		perc := 0.0
+		if games > 0 {
+			perc = min(100, 100*wins/games)
+		}
+		derived = append(derived,
+			storage.StatUpdate{Key: p + "_W_PERC", Value: strconv.FormatFloat(perc, 'f', 4, 64)},
+			storage.StatUpdate{Key: p + "_RANK", Value: values[0].Value})
+	}
+	if len(derived) == 0 {
+		return nil
+	}
+	return s.stats.UpdateStats(ctx, gameKey, owner, derived)
 }
 
 func (s *server) personaStats(ctx context.Context, c *aries.Client, m fesl.Message, a *account) {

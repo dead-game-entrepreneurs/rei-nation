@@ -383,7 +383,10 @@ func TestMessengerFriends(t *testing.T) {
 	// Search by prefix.
 	found := a.call("USCH", fesl.Field{Key: "USER", Value: "gold"}, fesl.Field{Key: "MAXR", Value: "5"})
 	expectField(t, found, "SIZE", "1")
-	expectField(t, a.next("USER"), "USER", "Goldfinger")
+	// Results carry the search's ID; the client drops entries without it.
+	result := a.next("USER")
+	expectField(t, result, "USER", "Goldfinger")
+	expectField(t, result, "ID", found.Fields()["ID"])
 
 	// A request shows as outgoing to the sender and incoming to the target.
 	// Roster notifications go out before the acknowledgement.
@@ -399,14 +402,19 @@ func TestMessengerFriends(t *testing.T) {
 	// Pending entries are listed only when asked for.
 	expectField(t, b.call("RGET", fesl.Field{Key: "LIST", Value: "B"}), "SIZE", "0")
 	expectField(t, b.call("RGET", fesl.Field{Key: "LIST", Value: "B"}, fesl.Field{Key: "PEND", Value: "Y"}), "SIZE", "1")
-	expectField(t, b.next("ROST"), "ATTR", "R")
+	rost := b.next("ROST")
+	expectField(t, rost, "ATTR", "R")
+	expectField(t, rost, "ID", strconv.Itoa(b.id))
 
-	// Accepting replaces the pending entry on both sides and exchanges presence.
-	b.send("RRSP", fesl.Field{Key: "USER", Value: "Bond"}, fesl.Field{Key: "ANSW", Value: "Y"})
-	expectField(t, b.next("RNOT"), "CHNG", "D")
-	expectField(t, a.next("RNOT"), "CHNG", "D")
-	expectField(t, b.next("RNOT"), "ATTR", "S")
-	expectField(t, a.next("RNOT"), "ATTR", "S")
+	// Accepting adds S on both sides with no D first: the client replaces a
+	// T entry itself, and a D would delete the requester's entry.
+	b.send("RRSP", fesl.Field{Key: "USER", Value: "Bond"}, fesl.Field{Key: "ANSW", Value: "Y"}, fesl.Field{Key: "PRES", Value: "Y"})
+	accepted := b.next("RNOT")
+	expectField(t, accepted, "CHNG", "A")
+	expectField(t, accepted, "ATTR", "S")
+	accepted = a.next("RNOT")
+	expectField(t, accepted, "CHNG", "A")
+	expectField(t, accepted, "ATTR", "S")
 	expectField(t, a.next("PGET"), "USER", "Goldfinger")
 	bondPresence := b.next("PGET")
 	expectField(t, bondPresence, "USER", "Bond")
@@ -574,4 +582,25 @@ func TestRankStats(t *testing.T) {
 	top := call("GetTopN", fesl.Field{Key: "key", Value: "kills"}, fesl.Field{Key: "minRank", Value: "1"}, fesl.Field{Key: "maxRank", Value: "1"})
 	expectField(t, top, "stats.[]", "1")
 	expectField(t, top, "stats.0.value", "9.0000")
+	// Once Xenia has joined Bond's game, Bond's report for her counts. Wins
+	// and games also fill in the rank and win percentage the screens read,
+	// and update type 5 replaces a value.
+	s.theater.mu.Lock()
+	s.theater.guests = map[int64]map[int64]time.Time{bond.ID: {xenia.ID: time.Now()}}
+	s.theater.mu.Unlock()
+	for _, won := range []string{"1", "0"} {
+		call("UpdateStats", fesl.Field{Key: "u.[]", Value: "1"},
+			fesl.Field{Key: "u.0.o", Value: strconv.FormatInt(xenia.ID, 10)}, fesl.Field{Key: "u.0.ot", Value: "1"},
+			fesl.Field{Key: "u.0.s.[]", Value: "3"},
+			fesl.Field{Key: "u.0.s.0.k", Value: "DM_W"}, fesl.Field{Key: "u.0.s.0.v", Value: won}, fesl.Field{Key: "u.0.s.0.ut", Value: "3"},
+			fesl.Field{Key: "u.0.s.1.k", Value: "DM_T_G"}, fesl.Field{Key: "u.0.s.1.v", Value: "1"}, fesl.Field{Key: "u.0.s.1.ut", Value: "3"},
+			fesl.Field{Key: "u.0.s.2.k", Value: "DM_CUR_L_STRK"}, fesl.Field{Key: "u.0.s.2.v", Value: "4"}, fesl.Field{Key: "u.0.s.2.ut", Value: "5"})
+	}
+	hers := call("GetRankedStats", fesl.Field{Key: "owner", Value: strconv.FormatInt(xenia.ID, 10)},
+		fesl.Field{Key: "keys.[]", Value: "3"}, fesl.Field{Key: "keys.0", Value: "DM_RANK"},
+		fesl.Field{Key: "keys.1", Value: "DM_W_PERC"}, fesl.Field{Key: "keys.2", Value: "DM_CUR_L_STRK"})
+	expectField(t, hers, "stats.0.value", "1.0000")
+	expectField(t, hers, "stats.0.rank", "1")
+	expectField(t, hers, "stats.1.value", "50.0000")
+	expectField(t, hers, "stats.2.value", "4.0000")
 }

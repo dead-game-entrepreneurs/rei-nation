@@ -140,6 +140,7 @@ func (h *messenger) Handle(ctx context.Context, c *aries.Client, f aries.Frame) 
 		ident = "0"
 	}
 	p := h.session(c)
+	h.logRequest(c, m)
 	ack := func(code uint32, extra ...fesl.Field) {
 		c.Send(fesl.Packet(m.Service, code, append([]fesl.Field{{Key: "ID", Value: ident}}, extra...)...))
 	}
@@ -191,6 +192,24 @@ func (h *messenger) Handle(ctx context.Context, c *aries.Client, f aries.Frame) 
 		h.srv.opts.Log.Info("unhandled messenger transaction", "conn", c.ID(), "kind", m.Service)
 		ack(msgOK)
 	}
+}
+
+// logRequest records each messenger request with its field names and the
+// values that carry no private content.
+func (h *messenger) logRequest(c *aries.Client, m fesl.Message) {
+	if m.Service == "PING" {
+		return
+	}
+	fields := map[string]string{}
+	for k, v := range m.Fields() {
+		switch strings.ToUpper(k) {
+		case "LKEY", "BODY", "SUBJ", "EXTR", "STAT":
+			fields[k] = "(redacted)"
+		default:
+			fields[k] = v
+		}
+	}
+	h.srv.opts.Log.Info("messenger request", "conn", c.ID(), "kind", m.Service, "code", m.Code, "fields", fields)
 }
 
 // withoutStore answers a server running without a database: the player can
@@ -356,7 +375,8 @@ func (h *messenger) search(ctx context.Context, c *aries.Client, m fesl.Message,
 	}
 	c.Send(fesl.Packet("USCH", msgOK, fesl.Field{Key: "ID", Value: ident}, fesl.Field{Key: "SIZE", Value: strconv.Itoa(len(names))}))
 	for _, n := range names {
-		c.Send(fesl.Packet("USER", msgOK, fesl.Field{Key: "USER", Value: n},
+		// The client only takes USER entries that carry the search's ID.
+		c.Send(fesl.Packet("USER", msgOK, fesl.Field{Key: "ID", Value: ident}, fesl.Field{Key: "USER", Value: n},
 			fesl.Field{Key: "DOMN", Value: msgDomain}, fesl.Field{Key: "RSRC", Value: msgResource}))
 	}
 }
@@ -382,7 +402,10 @@ func (h *messenger) roster(ctx context.Context, c *aries.Client, m fesl.Message,
 	}
 	c.Send(fesl.Packet("RGET", msgOK, fesl.Field{Key: "ID", Value: ident}, fesl.Field{Key: "SIZE", Value: strconv.Itoa(len(friends))}))
 	for _, f := range friends {
+		// The client counts ROST entries against SIZE only when they carry
+		// the RGET's ID, and flags the entry by which roster request it was.
 		c.Send(fesl.Packet("ROST", msgOK,
+			fesl.Field{Key: "ID", Value: ident},
 			fesl.Field{Key: "USER", Value: f.Name},
 			fesl.Field{Key: "UID", Value: strconv.FormatInt(f.ID, 10)},
 			fesl.Field{Key: "DOMN", Value: msgDomain},
@@ -479,11 +502,9 @@ func (h *messenger) changeRoster(ctx context.Context, c *aries.Client, m fesl.Me
 			h.storeFailed(c, ack, err)
 			return
 		}
-		if state == storage.FriendAccepted && before == storage.FriendIncoming {
-			// The client ORs flags into an existing entry, so the pending entry
-			// goes before the accepted one is added.
-			h.dropBoth(self, other)
-		}
+		// An A with S on an entry that holds T replaces T on the client
+		// (RNOT handler near 0x4ccf88), so an accept needs no D first; a D
+		// would delete the entry the client keeps from its own request.
 		if state == before {
 			break
 		}
@@ -508,13 +529,13 @@ func (h *messenger) changeRoster(ctx context.Context, c *aries.Client, m fesl.Me
 			ack(msgUser)
 			return
 		}
-		if changed {
+		switch {
+		case changed && accept:
+			h.notifyRoster(self.Name, other, "A", storage.FriendAccepted)
+			h.notifyRoster(other.Name, self, "A", storage.FriendAccepted)
+			h.exchangePresence(ctx, c, self, other)
+		case changed:
 			h.dropBoth(self, other)
-			if accept {
-				h.notifyRoster(self.Name, other, "A", storage.FriendAccepted)
-				h.notifyRoster(other.Name, self, "A", storage.FriendAccepted)
-				h.exchangePresence(ctx, c, self, other)
-			}
 		}
 	default: // RDEL or RDEM on the buddy list
 		changed, err := social.ChangeBuddy(ctx, gameKey, self.Name, other.Name, "remove")

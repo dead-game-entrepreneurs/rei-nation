@@ -123,8 +123,21 @@ The client's messenger tag table (built near `0x4c5944`) lists `AUTH`, `DISC`,
 `SEND`, `RECV`, `BRDC`, `EPST`, `EPGT`, `ADMN` and `PING`. The field names in
 its string table (`USER`, `DOMN`, `RSRC`, `SHOW`, `STAT`, `GROUP`, `CHNG`,
 `ATTR`, `TYPE`, `SUBJ`, `BODY`, `NOREPLY`, ...) match the TimeSplitters build of
-the same library, so the roster rules below follow that server. None of the
-buddy-list flow has been tried on a console yet.
+the same library, so the roster rules below follow that server where the
+GoldenEye binary does not say otherwise. First console test: 2026-11-26.
+
+The client's reply handler (`FUN_004ce578`) matches several replies by the
+transaction `ID` it sent, not by tag alone: `RGET` must carry ID 2 (buddy list)
+or 1, `USCH` ID 3 and `EPGT` ID 4, and every `ROST` and `USER` entry must carry
+the same `ID` as its request or the client ignores it. Request fields
+(resolved from the client's builders): `USCH` sends `USER`, `DOMN`, `RSRC`,
+`DIST` (`T`/`F`) and `MAXR`; `RADM` sends `USER`, `GROUP`, `LSRC` and `PRES`;
+`RRSP` sends `USER` and `ANSW` (`Y` accept, `N` decline, `B` block) and `PRES`
+on accept. `ATTR` letters map to entry flags by letter (`S` 0x40000, `T`
+0x80000; `R` sets nothing). An `RNOT CHNG=A ATTR=S` on an entry holding `T`
+replaces `T` with `S`, and `CHNG=D` clears only `S`, `T` and flag 4, deleting
+the entry when nothing else is left. Entries that came from the sign-in
+`RGET` keep flag 0x200, so a `D` does not remove them until the next sign-in.
 
 | Command | Purpose | Status |
 | --- | --- | --- |
@@ -134,7 +147,7 @@ buddy-list flow has been tried on a console yet.
 | `RGET` | Roster: `SIZE`, then one `ROST` per friend (`ATTR` `S` friend, `R` request received, `T` request sent). `PEND=Y` includes requests; `PRES=Y` adds `PGET` for online friends. The ignore list (`LIST=I`) is returned empty, as TimeSplitters does. | Synthetic test. |
 | `USCH` | Persona search by prefix, up to 20 `USER` replies. | Synthetic test. |
 | `RADM` | Friend request. Both sides get `RNOT CHNG=A`. A request to someone who already asked accepts it. | Synthetic test. |
-| `RRSP` | Answer a request (`ANSW=Y` accepts). The pending entry is removed with `CHNG=D` before the friend is added, because the client ORs flags into an existing entry. | Synthetic test. |
+| `RRSP` | Answer a request (`ANSW=Y` accepts). On accept both sides get `RNOT CHNG=A ATTR=S` with no `D` first; a decline sends `D`. The first console test sent a `D` first and lost the requester's entry. | Synthetic test. |
 | `RDEL`, `RDEM` | Remove a friend. `RNOT CHNG=D` only for a friendship that existed. | Synthetic test. |
 | `RADD`/`RDEL` with `LIST=I` | Block and unblock. A block also ends the friendship. | Synthetic test. |
 | `PADD`, `PDEL` | Watch a friend's presence; `PADD` answers with `PGET`. | Synthetic test. |
@@ -189,9 +202,17 @@ played on 2026-11-26.
   `u.%d.s.%d.k/v/ut/t`, `keys.%d`, `minRank`, `maxRank`, `periodId`,
   `periodPast`, `stats.%d.key/value/rank/text/owner/name` and
   `stats.%d.addStats.%d.*`). `rank.go` stores persona stats in
-  `eanation.player_stats`: `UpdateStats` adds the value for update type 3 (what
-  TimeSplitters sends after a match) and replaces it for type 0 (assumed); other
-  types, and owners other than the signed-in persona, are logged and skipped.
+  `eanation.player_stats`: `UpdateStats` adds the value for update type 3 and
+  replaces it for type 5 (GoldenEye sends 5 for current loss streaks, which
+  reset) and type 0 (assumed). In the first console match the host sent one
+  report for its guest and one for itself, and the guest sent none, so a
+  report for another persona is accepted when that persona was admitted to
+  one of the reporter's games in the last three hours.
+  The screens read `<MODE>_RANK`, `<MODE>_W_PERC` and `<MODE>_K` (modes seen:
+  `DM`, `TOW`, `D`, `CD`, `TD`) but the game reports only totals such as
+  `DM_W`, `DM_T_G`, `DM_K`, `DM_DTHS` and `DM_CUM_PLACE`. The server derives
+  `<MODE>_W_PERC` as 100 times wins over games and `<MODE>_RANK` as the win
+  count; the original formula is unknown.
   `GetStats` and `GetRankedStats` return each requested key with its
   competition rank (highest first, 0 when the persona has no value);
   `GetTopN` and `GetTopNAndStats` return up to 16 rows, the client's capacity in

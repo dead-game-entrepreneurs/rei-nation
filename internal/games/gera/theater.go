@@ -35,6 +35,21 @@ type theater struct {
 	connIP   map[*aries.Client]string // theater TCP peer IP, for ECHO attribution
 	observed map[*aries.Client]addr   // latest UDP endpoint seen for a connection
 	nextGID  int
+	// guests records, per host persona, when each guest persona was last
+	// admitted to one of its games. The host reports stats for its guests.
+	guests map[int64]map[int64]time.Time
+}
+
+// guestReportWindow is how long after admitting a guest a host may report
+// that guest's stats. A match and its results screen fit well inside it.
+const guestReportWindow = 3 * time.Hour
+
+// hostedGuest reports whether guest joined a game hosted by host recently.
+func (h *theater) hostedGuest(host, guest int64) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	t, ok := h.guests[host][guest]
+	return ok && time.Since(t) < guestReportWindow
 }
 
 type theaterSession struct {
@@ -505,6 +520,21 @@ func (h *theater) joinResponse(c *aries.Client, m fesl.Message, tid string) {
 	if approved {
 		pending.entered = false
 		g.players[pid] = pending
+		if g.host.personaID != 0 && pending.uid != 0 && pending.uid != g.host.personaID {
+			if h.guests == nil {
+				h.guests = make(map[int64]map[int64]time.Time)
+			}
+			if h.guests[g.host.personaID] == nil {
+				h.guests[g.host.personaID] = make(map[int64]time.Time)
+			}
+			now := time.Now()
+			for id, t := range h.guests[g.host.personaID] {
+				if now.Sub(t) >= guestReportWindow {
+					delete(h.guests[g.host.personaID], id)
+				}
+			}
+			h.guests[g.host.personaID][pending.uid] = now
+		}
 	}
 	self := pending.writer == g.owner
 	joiner := pending.writer
