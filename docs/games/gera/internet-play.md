@@ -116,10 +116,15 @@ by loopback tests only.
 Each player needs:
 
 - **DNS:** point `gera.en_US.fesl.ea.com` and `gera.fesl.ea.com` at the
-  server's public address. In PCSX2, add both to the internal DNS hosts list
-  and also add `gera.en_us.fesl.ea.com`: the internal DNS compares names in
-  lowercase. A real PS2 needs a DNS server with the same entries, for example
-  [`configs/gera.dns.yaml`](../../../configs/gera.dns.yaml).
+  server's public address. A real PS2 needs a DNS server with both entries,
+  for example [`configs/gera.dns.yaml`](../../../configs/gera.dns.yaml). In
+  PCSX2's internal DNS hosts list, add **only** `gera.fesl.ea.com`. PCSX2
+  matches names in lowercase, and with a `gera.en_us.fesl.ea.com` entry it
+  answers, yet the game asks four more times over about 15 seconds before
+  falling back to `gera.fesl.ea.com` (seen in PCSX2's log on 2026-11-26;
+  probably the answer carries the lowercased name, which the game does not
+  accept). Without that entry the lookup fails at once and the game falls
+  back immediately.
 - **DNAS:** the client passes DNAS before FESL. Rei Nation does not serve
   DNAS; players need their own DNAS replacement or bypass, as for other
   revived PS2 titles.
