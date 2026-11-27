@@ -33,6 +33,9 @@ services:
       REI_NATION_HEALTH_PORT: ${REI_NATION_HEALTH_PORT:-8086}
       REI_NATION_RELAY: ${REI_NATION_RELAY:-auto}
       REI_NATION_TSFP_RELAY_IP: ${REI_NATION_TSFP_RELAY_IP:-}
+      REI_NATION_TSFP_RELAY_TOKENS: ${REI_NATION_TSFP_RELAY_TOKENS:-}
+      REI_NATION_TSFP_RELAY_CONTROL_CERT: ${REI_NATION_TSFP_RELAY_CONTROL_CERT:-}
+      REI_NATION_TSFP_RELAY_CONTROL_KEY: ${REI_NATION_TSFP_RELAY_CONTROL_KEY:-}
       REI_NATION_PG_PORT: ${REI_NATION_PG_PORT:-55434}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       REI_NATION_SMTP_ADDR: ${REI_NATION_SMTP_ADDR:-}
@@ -42,6 +45,8 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    volumes:
+      - ${REI_NATION_TSFP_RELAY_DIR:-./deploy/relay-control}:/relay-control:ro
     healthcheck:
       test: ["CMD", "/rei-nation", "-healthcheck"]
       interval: 10s

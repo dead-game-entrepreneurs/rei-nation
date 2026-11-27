@@ -50,27 +50,33 @@ restricted to trusted clients.
 ## Peer routing
 
 Gameplay goes directly between consoles by default, commonly on UDP 3000.
-For a relay, set `REI_NATION_TSFP_RELAY_IP` to a second locally assigned IPv4
-address that clients can reach and allow UDP 20000–20255 on it. The client
-treats packets from the advertised Theater address as control traffic, so the
-relay needs its own address. Each admitted relay member gets a UDP port that
-represents them to the other players.
+For a relay, set `REI_NATION_TSFP_RELAY_IP` to a distinct public IPv4 that
+clients can reach and allow UDP 20000–20255 on it. The client treats packets
+from the advertised Theater address as control traffic, so a container-only
+address on the Theater host is insufficient. Each admitted relay member gets a
+UDP port that represents them to the other players.
 
-With an address configured, `REI_NATION_RELAY=always` tries the relay on every
-guest join. In `auto`, Theater probes the host from the relay address. A host
-that answers can use the relay for the alternate route while the guest probes
-the direct route first. When an approved join ends before `PENT`, the next
-attempt starts with the relay. The retry decision lasts up to 24 hours in
-memory. Set `off` for direct play only.
+With an address configured, `REI_NATION_RELAY=always` uses the relay for joins
+between distinct public addresses. In `auto`, Theater probes the host from the
+relay address and uses the relay only after a verified response. Set `off` for
+direct play only. The stock client has no automatic relay retry after Theater
+hands off an endpoint.
+
+The relay may run on a separate host. Configure the control certificate, key,
+and hashed token registry on Theater, then run `cmd/tsfp-relay` with its
+plaintext token file and pinned control certificate. The node initiates the TLS
+connection on TCP 18073; Theater accepts only the registered name, token digest,
+declared public IP, and source IP. Live rooms remain open across a brief control
+reconnect and expire after three minutes without game traffic.
 
 ## Cutover and website
 
-Use `scripts/migrate-tsfp-sqlite.py` to move accounts, legacy password hashes,
-personas, friendships, queued messages, maps and ratings into an empty Rei
-Nation database. The command and cutover order are documented in the main
-README. The optional Django deployment stored ranking totals in PostgreSQL, so
-those values require a separate export keyed by persona name. Keep the original
-database backup until record counts and the stock-client login agree.
+Use `scripts/migrate-tsfp-sqlite.py` for the original SQLite state or
+`scripts/migrate-tsfp-django.sql` when Django PostgreSQL is authoritative. The
+latter includes accounts, personas, friendships, queued messages, maps,
+ratings, and all-time persona statistics. The commands and cutover order are
+documented in the main README. Keep the original database backup until record
+counts and the stock-client login agree.
 
 For a future community site, start with public server status and read-only map
 and leaderboard views backed by a dedicated API. Account linking, publication

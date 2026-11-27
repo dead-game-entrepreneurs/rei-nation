@@ -69,7 +69,11 @@ func run(health bool, log *slog.Logger) error {
 	selected, err := conf.Select([]game.Definition{nascar04.Definition(),
 		tsfp.Definition(env("REI_NATION_TSFP_CERT", "/tsfp-certs/fesl-cert.pem"),
 			env("REI_NATION_TSFP_KEY", "/tsfp-certs/fesl-key.pem"),
-			os.Getenv("REI_NATION_TSFP_RELAY_IP"))})
+			os.Getenv("REI_NATION_TSFP_RELAY_IP"), tsfp.RemoteRelayConfig{
+				TokensFile: os.Getenv("REI_NATION_TSFP_RELAY_TOKENS"),
+				CertFile:   os.Getenv("REI_NATION_TSFP_RELAY_CONTROL_CERT"),
+				KeyFile:    os.Getenv("REI_NATION_TSFP_RELAY_CONTROL_KEY"),
+			})})
 	if err != nil {
 		return err
 	}

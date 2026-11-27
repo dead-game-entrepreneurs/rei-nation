@@ -121,7 +121,8 @@ Allow these ports for the features you use.
 | TCP 18070 | TSFP FESL |
 | TCP and UDP 18071 | TSFP Theater and endpoint discovery |
 | TCP 18072 | TSFP Messenger |
-| UDP 20000–20255 | Optional TSFP peer relay on a separate server address |
+| TCP 18073 | Optional remote-relay control; restrict to the registered relay IP |
+| UDP 20000–20255 | Optional TSFP peer relay on its separate public address |
 
 PostgreSQL and `/healthz` bind to the host loopback interface on ports `55434` and `8086` by default. `docker compose down` stops both services and keeps the database volume. The legacy client uses plaintext Aries on the network. Create an account password dedicated to the game.
 
@@ -140,6 +141,24 @@ Set `REI_NATION_RELAY` in `.env` to choose the route before matchmaking hands of
 | `off` | Uses direct play. |
 
 For TSFP, relay members are pinned to the UDP address observed during matchmaking; packets from another source port are rejected. If both consoles share an address, the server offers direct play. The stock client accepts one endpoint per attempt and has no automatic relay retry. NASCAR race traffic uses the relay independently; EA SPORTS Talk uses UDP `6000` directly between peers.
+
+The TSFP relay must use a public IPv4 distinct from Theater. If that address is
+assigned to the same host, set `REI_NATION_TSFP_RELAY_IP` and leave the remote
+relay settings empty. For a separate relay host, also set
+`REI_NATION_TSFP_RELAY_TOKENS`, `REI_NATION_TSFP_RELAY_CONTROL_CERT`, and
+`REI_NATION_TSFP_RELAY_CONTROL_KEY`. The token registry uses the original
+`name sha256:<digest> public-ip` format and stores no plaintext token.
+
+Build the remote node and install the supplied systemd unit and environment
+template from `deploy/`. The node keeps the plaintext token in its root-owned
+token file, pins the control certificate, and dials Theater over TLS. Theater
+also verifies the token digest, node name, declared public address, and TCP
+source address. Allow its UDP range publicly and allow TCP 18073 on Theater
+only from the registered relay address.
+
+```sh
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o tsfp-relay ./cmd/tsfp-relay
+```
 
 ### Messenger and account recovery
 
@@ -168,9 +187,22 @@ docker compose start rei-nation
 The importer is transactional and refuses to load into a database that already
 contains accounts. When legacy accounts reuse one recovery email, the first
 account keeps it and later duplicates are cleared to satisfy Rei Nation's unique
-email rule. Original Django ranking totals live in its PostgreSQL database
-rather than `accounts.sqlite3`; migrate those totals separately before retiring
-that database. Login sessions are recreated when players sign in to Rei Nation.
+email rule. When Django PostgreSQL is authoritative, export the complete
+account, social, map, rating, and all-time persona-stat dataset directly
+instead. Run the exporter against a consistent source snapshot and feed its
+output to an initialized, empty Rei Nation database:
+
+```sh
+psql -XqAt -v ON_ERROR_STOP=1 "$OLD_DATABASE_URL" \
+  -f scripts/migrate-tsfp-django.sql > tsfp-import.sql
+psql -X -v ON_ERROR_STOP=1 "$REI_NATION_DATABASE_URL" < tsfp-import.sql
+```
+
+The generated import is transactional and refuses a nonempty account table.
+It preserves numeric IDs and converts the original password hashes without
+exposing plaintext passwords. Keep both the source database backup and the
+generated import protected because they contain account and map data. Login
+sessions are recreated when players sign in to Rei Nation.
 
 ## Development
 

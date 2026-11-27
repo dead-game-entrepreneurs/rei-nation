@@ -25,6 +25,7 @@ type theater struct {
 	hosting    map[*aries.Client]*match
 	nextID     int
 	relayIP    netip.Addr
+	relayHub   *remoteRelayHub
 	udp        *net.UDPConn
 	relayMode  string
 	probeSlots chan struct{}
@@ -49,7 +50,7 @@ type match struct {
 	attrs, details     map[string]string
 	players            map[int]*entrant
 	activity           time.Time
-	relay              *relayRoom
+	relay              relaySession
 	relayReachable     bool
 	relayProbeAddr     netip.AddrPort
 	relayProbedAt      time.Time
@@ -67,8 +68,12 @@ type entrant struct {
 	endpoint  netip.AddrPort
 }
 
-func newTheater(keys *loginKeys, relayIP netip.Addr, mode string) *theater {
-	return &theater{keys: keys, relayIP: relayIP, relayMode: mode,
+func newTheater(keys *loginKeys, relayIP netip.Addr, mode string, hubs ...*remoteRelayHub) *theater {
+	var hub *remoteRelayHub
+	if len(hubs) != 0 {
+		hub = hubs[0]
+	}
+	return &theater{keys: keys, relayIP: relayIP, relayHub: hub, relayMode: mode,
 		sessions: make(map[*aries.Client]*theaterSession), games: make(map[int]*match),
 		hosting: make(map[*aries.Client]*match), probeSlots: make(chan struct{}, 16)}
 }

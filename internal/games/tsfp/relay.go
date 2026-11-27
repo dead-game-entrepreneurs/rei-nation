@@ -35,6 +35,13 @@ type relayMember struct {
 	closed   bool
 }
 
+type relaySession interface {
+	add(int, netip.AddrPort) error
+	address(int) netip.AddrPort
+	remove(int)
+	close()
+}
+
 func relayRouteFor(mode string, available, reachable bool, host, guest netip.Addr) relayRoute {
 	if !available || host == guest {
 		return direct
@@ -46,7 +53,8 @@ func relayRouteFor(mode string, available, reachable bool, host, guest netip.Add
 }
 
 func (t *theater) joinRelay(g *match, pid int, endpoint netip.AddrPort) (netip.AddrPort, relayRoute) {
-	if !t.relayIP.IsValid() || t.relayMode == "off" {
+	available := t.relayHub != nil && t.relayHub.available() || t.relayHub == nil && t.relayIP.IsValid()
+	if !available || t.relayMode == "off" {
 		return endpoint, direct
 	}
 	host := t.endpoint(g.owner, g.external).Addr()
@@ -56,8 +64,12 @@ func (t *theater) joinRelay(g *match, pid int, endpoint netip.AddrPort) (netip.A
 	}
 	room := g.relay
 	if room == nil {
-		// The game treats packets from the Theater IP as control traffic.
-		room = &relayRoom{ip: t.relayIP, members: make(map[int]*relayMember)}
+		if t.relayHub != nil {
+			room = t.relayHub.room(strconv.Itoa(g.id))
+		} else {
+			// The game treats packets from the Theater IP as control traffic.
+			room = &relayRoom{ip: t.relayIP, members: make(map[int]*relayMember)}
+		}
 		if room.add(1, t.endpoint(g.owner, g.external)) != nil {
 			return endpoint, direct
 		}
@@ -105,7 +117,8 @@ func openRelaySocket(ip netip.Addr) (*net.UDPConn, error) {
 }
 
 func (t *theater) probeRelay(g *match) {
-	if !t.relayIP.IsValid() || t.relayMode == "off" || t.relayMode == "always" {
+	available := t.relayHub != nil && t.relayHub.available() || t.relayHub == nil && t.relayIP.IsValid()
+	if !available || t.relayMode == "off" || t.relayMode == "always" {
 		return
 	}
 	target := t.endpoint(g.owner, g.external)
@@ -126,7 +139,12 @@ func (t *theater) probeRelay(g *match) {
 	probed := g.relayProbedAt
 	go func() {
 		defer func() { <-t.probeSlots }()
-		ok := relayProbe(t.relayIP, target)
+		ok := false
+		if t.relayHub != nil {
+			ok = t.relayHub.probe(target)
+		} else {
+			ok = relayProbe(t.relayIP, target)
+		}
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		if t.games[g.id] == g && g.relayProbeAddr == target && g.relayProbedAt == probed {
