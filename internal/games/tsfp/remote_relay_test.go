@@ -74,8 +74,15 @@ func TestRemoteRelayControlAndForwarding(t *testing.T) {
 	if err := room.add(1, host.LocalAddr().(*net.UDPAddr).AddrPort()); err != nil {
 		t.Fatal(err)
 	}
+	remote := room.(*remoteRelayRoom)
+	if _, err := hub.request(relayControlMessage{Op: "close", Room: remote.id}, time.Second); err != nil {
+		t.Fatalf("simulate relay room loss: %v", err)
+	}
 	if err := room.add(2, guest.LocalAddr().(*net.UDPAddr).AddrPort()); err != nil {
-		t.Fatal(err)
+		t.Fatalf("restore room after relay loss: %v", err)
+	}
+	if !room.address(1).IsValid() || !room.address(2).IsValid() {
+		t.Fatal("restored room is missing a member port")
 	}
 	if _, err := host.WriteToUDPAddrPort([]byte("host mapping"), room.address(2)); err != nil {
 		t.Fatal(err)
@@ -96,6 +103,47 @@ func TestRemoteRelayControlAndForwarding(t *testing.T) {
 		t.Fatalf("guest received %q from %s", data, source)
 	}
 	room.close()
+}
+
+func TestRemoteRelayServeClosesUnauthenticatedConnections(t *testing.T) {
+	certFile, keyFile := relayCertificate(t)
+	directory := t.TempDir()
+	tokensFile := filepath.Join(directory, "tokens.txt")
+	relayIP := netip.MustParseAddr("127.0.0.22")
+	digest := sha256.Sum256([]byte("synthetic-relay-token"))
+	if err := os.WriteFile(tokensFile, []byte(fmt.Sprintf("test sha256:%x %s\n", digest, relayIP)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hub, err := newRemoteRelayHub(relayIP, tokensFile, certFile, keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- hub.serve(ctx, listener) }()
+	conn, err := net.Dial("tcp4", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte{0x16}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("relay hub did not wait for and close an unauthenticated handler")
+	}
 }
 
 func relayCertificate(t *testing.T) (string, string) {

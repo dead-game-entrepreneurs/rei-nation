@@ -61,11 +61,12 @@ type relayControlLink struct {
 }
 
 type remoteRelayRoom struct {
-	hub   *remoteRelayHub
-	id    string
-	mu    sync.Mutex
-	ports map[int]uint16
-	dead  bool
+	hub       *remoteRelayHub
+	id        string
+	mu        sync.Mutex
+	ports     map[int]uint16
+	endpoints map[int]netip.AddrPort
+	dead      bool
 }
 
 func newRemoteRelayHub(ip netip.Addr, tokensFile, certFile, keyFile string) (*remoteRelayHub, error) {
@@ -130,13 +131,32 @@ func (h *remoteRelayHub) available() bool {
 }
 
 func (h *remoteRelayHub) room(label string) relaySession {
-	return &remoteRelayRoom{hub: h, id: h.prefix + "-" + label, ports: make(map[int]uint16)}
+	id := h.prefix + "-" + label + "-" + strconv.FormatUint(h.next.Add(1), 36)
+	return &remoteRelayRoom{hub: h, id: id, ports: make(map[int]uint16), endpoints: make(map[int]netip.AddrPort)}
 }
 
 func (h *remoteRelayHub) serve(ctx context.Context, raw net.Listener) error {
 	ln := tls.NewListener(raw, h.tls)
-	stop := context.AfterFunc(ctx, func() { ln.Close() })
-	defer stop()
+	var activeMu sync.Mutex
+	var handlers sync.WaitGroup
+	active := make(map[net.Conn]struct{})
+	closeActive := func() {
+		activeMu.Lock()
+		defer activeMu.Unlock()
+		for conn := range active {
+			_ = conn.Close()
+		}
+	}
+	stop := context.AfterFunc(ctx, func() {
+		_ = ln.Close()
+		closeActive()
+	})
+	defer func() {
+		stop()
+		_ = ln.Close()
+		closeActive()
+		handlers.Wait()
+	}()
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -145,7 +165,24 @@ func (h *remoteRelayHub) serve(ctx context.Context, raw net.Listener) error {
 			}
 			return err
 		}
-		go h.accept(ctx, conn)
+		activeMu.Lock()
+		if ctx.Err() != nil {
+			activeMu.Unlock()
+			_ = conn.Close()
+			continue
+		}
+		active[conn] = struct{}{}
+		handlers.Add(1)
+		activeMu.Unlock()
+		go func() {
+			defer handlers.Done()
+			defer func() {
+				activeMu.Lock()
+				delete(active, conn)
+				activeMu.Unlock()
+			}()
+			h.accept(ctx, conn)
+		}()
 	}
 }
 
@@ -207,7 +244,9 @@ func (h *remoteRelayHub) accept(ctx context.Context, conn net.Conn) {
 		}
 		if message.Op == "closed" {
 			h.log.Info("TSFP relay room closed", "room", short(message.Room, 64))
-			continue
+			if message.ID == "" {
+				continue
+			}
 		}
 		link.mu.Lock()
 		response := link.pending[message.ID]
@@ -258,6 +297,10 @@ func (h *remoteRelayHub) request(message relayControlMessage, timeout time.Durat
 	h.mu.Lock()
 	link := h.link
 	h.mu.Unlock()
+	return h.requestLink(link, message, timeout)
+}
+
+func (h *remoteRelayHub) requestLink(link *relayControlLink, message relayControlMessage, timeout time.Duration) (relayControlMessage, error) {
 	if link == nil {
 		return relayControlMessage{}, errors.New("relay is offline")
 	}
@@ -288,9 +331,25 @@ func (h *remoteRelayHub) request(message relayControlMessage, timeout time.Durat
 	}
 }
 
-func (h *remoteRelayHub) probe(target netip.AddrPort) bool {
-	reply, err := h.request(relayControlMessage{Op: "probe", Target: []any{target.Addr().String(), target.Port()}}, 4*time.Second)
-	return err == nil && reply.Op == "probed" && reply.Reachable
+func (h *remoteRelayHub) probe(target netip.AddrPort) (bool, *relayControlLink, error) {
+	h.mu.Lock()
+	link := h.link
+	h.mu.Unlock()
+	reply, err := h.requestLink(link,
+		relayControlMessage{Op: "probe", Target: []any{target.Addr().String(), target.Port()}}, 4*time.Second)
+	if err != nil {
+		return false, link, err
+	}
+	if reply.Op != "probed" {
+		return false, link, errors.New("relay returned an invalid probe response")
+	}
+	return reply.Reachable, link, nil
+}
+
+func (h *remoteRelayHub) current(link *relayControlLink) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.link == link
 }
 
 func (r *remoteRelayRoom) add(pid int, endpoint netip.AddrPort) error {
@@ -299,24 +358,34 @@ func (r *remoteRelayRoom) add(pid int, endpoint netip.AddrPort) error {
 	if r.dead {
 		return errors.New("relay room is closed")
 	}
-	reply, err := r.hub.request(relayControlMessage{Op: "add", Room: r.id, Members: map[string][]any{
-		strconv.Itoa(pid): {endpoint.Addr().String(), endpoint.Port()},
-	}}, 3*time.Second)
+	requested := make(map[int]netip.AddrPort, len(r.endpoints)+1)
+	wire := make(map[string][]any, len(r.endpoints)+1)
+	for id, known := range r.endpoints {
+		requested[id] = known
+		wire[strconv.Itoa(id)] = []any{known.Addr().String(), known.Port()}
+	}
+	requested[pid] = endpoint
+	wire[strconv.Itoa(pid)] = []any{endpoint.Addr().String(), endpoint.Port()}
+	reply, err := r.hub.request(relayControlMessage{Op: "add", Room: r.id, Members: wire}, 3*time.Second)
 	if err != nil {
 		return fmt.Errorf("add remote relay member: %w", err)
 	}
 	if reply.Op != "added" {
 		return errors.New("relay rejected member")
 	}
+	ports := make(map[int]uint16, len(requested))
 	for key, port := range reply.Ports {
 		id, parseErr := strconv.Atoi(key)
-		if parseErr == nil && port > 0 && port <= 65535 {
-			r.ports[id] = uint16(port)
+		if parseErr == nil && port > 0 && port <= 65535 && requested[id].IsValid() {
+			ports[id] = uint16(port)
 		}
 	}
-	if r.ports[pid] == 0 {
-		return errors.New("relay did not assign a member port")
+	for id := range requested {
+		if ports[id] == 0 {
+			return errors.New("relay did not restore every member port")
+		}
 	}
+	r.endpoints, r.ports = requested, ports
 	return nil
 }
 
@@ -333,11 +402,9 @@ func (r *remoteRelayRoom) remove(pid int) {
 		return
 	}
 	delete(r.ports, pid)
+	delete(r.endpoints, pid)
 	r.mu.Unlock()
-	h := r.hub
-	go func() {
-		_ = h.send(relayControlMessage{Op: "remove", Room: r.id, Members: map[string][]any{strconv.Itoa(pid): {}}})
-	}()
+	_ = r.hub.send(relayControlMessage{Op: "remove", Room: r.id, Members: map[string][]any{strconv.Itoa(pid): {}}})
 }
 
 func (r *remoteRelayRoom) close() {
@@ -348,8 +415,7 @@ func (r *remoteRelayRoom) close() {
 	}
 	r.dead = true
 	r.mu.Unlock()
-	h := r.hub
-	go func() { _ = h.send(relayControlMessage{Op: "close", Room: r.id}) }()
+	_, _ = r.hub.request(relayControlMessage{Op: "close", Room: r.id}, 3*time.Second)
 }
 
 func (h *remoteRelayHub) send(message relayControlMessage) error {

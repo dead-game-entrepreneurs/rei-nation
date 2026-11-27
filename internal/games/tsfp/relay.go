@@ -71,6 +71,7 @@ func (t *theater) joinRelay(g *match, pid int, endpoint netip.AddrPort) (netip.A
 			room = &relayRoom{ip: t.relayIP, members: make(map[int]*relayMember)}
 		}
 		if room.add(1, t.endpoint(g.owner, g.external)) != nil {
+			room.close()
 			return endpoint, direct
 		}
 		for otherPID, p := range g.players {
@@ -140,14 +141,20 @@ func (t *theater) probeRelay(g *match) {
 	go func() {
 		defer func() { <-t.probeSlots }()
 		ok := false
+		var probeErr error
+		var link *relayControlLink
 		if t.relayHub != nil {
-			ok = t.relayHub.probe(target)
+			ok, link, probeErr = t.relayHub.probe(target)
 		} else {
 			ok = relayProbe(t.relayIP, target)
 		}
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		if t.games[g.id] == g && g.relayProbeAddr == target && g.relayProbedAt == probed {
+			if probeErr != nil || t.relayHub != nil && !t.relayHub.current(link) {
+				g.relayProbedAt = time.Time{}
+				return
+			}
 			g.relayReachable = ok
 		}
 	}()

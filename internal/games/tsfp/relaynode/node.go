@@ -45,7 +45,7 @@ type Node struct {
 	first     uint16
 	last      uint16
 	rooms     map[string]*room
-	usedPorts map[uint16]bool
+	usedPorts map[uint16]*member
 	private   bool
 	log       *slog.Logger
 }
@@ -60,13 +60,10 @@ type room struct {
 }
 
 type member struct {
-	key      string
 	endpoint netip.AddrPort
-	peers    map[string]netip.AddrPort
 	socket   *net.UDPConn
 	budget   float64
 	refilled time.Time
-	heard    bool
 	closed   bool
 }
 
@@ -117,7 +114,7 @@ func New(config Config) (*Node, error) {
 		config.Log = slog.Default()
 	}
 	return &Node{bind: config.Bind, first: config.FirstPort, last: config.LastPort,
-		rooms: make(map[string]*room), usedPorts: make(map[uint16]bool), private: config.AllowPrivate, log: config.Log}, nil
+		rooms: make(map[string]*room), usedPorts: make(map[uint16]*member), private: config.AllowPrivate, log: config.Log}, nil
 }
 
 func Run(ctx context.Context, config Config) error {
@@ -189,7 +186,9 @@ func (n *Node) control(ctx context.Context, config Config, tlsConfig *tls.Config
 			Enable: true, Idle: 30 * time.Second, Interval: 15 * time.Second, Count: 4,
 		},
 	}}
-	conn, err := dialer.DialContext(ctx, "tcp", config.Server)
+	attempt, cancel := context.WithTimeout(ctx, 10*time.Second)
+	conn, err := dialer.DialContext(attempt, "tcp", config.Server)
+	cancel()
 	if err != nil {
 		return err
 	}
@@ -251,7 +250,9 @@ func (n *Node) handle(request message) message {
 	case "remove":
 		n.remove(request.Room, request.Members)
 	case "close":
-		return n.close(request.Room)
+		reply := n.close(request.Room)
+		reply.ID = request.ID
+		return reply
 	case "probe":
 		target, err := parseTarget(request.Target, n.private)
 		if err != nil {
@@ -338,13 +339,20 @@ func (n *Node) add(id string, raw members) (map[string]int, error) {
 		r = &room{node: n, id: id, members: make(map[string]*member), last: time.Now()}
 		n.rooms[id] = r
 	}
-	if len(r.members)+len(members) > maxMembers {
+	newMembers := 0
+	for key := range members {
+		if r.members[key] == nil {
+			newMembers++
+		}
+	}
+	if len(r.members)+newMembers > maxMembers {
 		return nil, errors.New("relay room is full")
 	}
 	var addedKeys []string
+	updates := make(map[*member]netip.AddrPort)
 	for key, endpoint := range members {
 		if existing := r.members[key]; existing != nil {
-			existing.endpoint = endpoint
+			updates[existing] = endpoint
 			continue
 		}
 		socket, port, err := n.openSocket()
@@ -362,12 +370,15 @@ func (n *Node) add(id string, raw members) (map[string]int, error) {
 			}
 			return nil, err
 		}
-		m := &member{key: key, endpoint: endpoint, peers: make(map[string]netip.AddrPort), socket: socket,
+		m := &member{endpoint: endpoint, socket: socket,
 			budget: burstBytes, refilled: time.Now()}
 		r.members[key] = m
 		addedKeys = append(addedKeys, key)
-		n.usedPorts[port] = true
+		n.usedPorts[port] = m
 		go n.receive(r, m, port)
+	}
+	for existing, endpoint := range updates {
+		existing.endpoint = endpoint
 	}
 	r.last = time.Now()
 	ports := make(map[string]int, len(r.members))
@@ -383,7 +394,7 @@ func (n *Node) openSocket() (*net.UDPConn, uint16, error) {
 	start := rand.IntN(width)
 	for offset := range width {
 		port := n.first + uint16((start+offset)%width)
-		if n.usedPorts[port] {
+		if n.usedPorts[port] != nil {
 			continue
 		}
 		socket, err := net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(n.bind, port)))
@@ -397,7 +408,9 @@ func (n *Node) openSocket() (*net.UDPConn, uint16, error) {
 func (n *Node) receive(r *room, target *member, port uint16) {
 	defer func() {
 		n.mu.Lock()
-		delete(n.usedPorts, port)
+		if n.usedPorts[port] == target {
+			delete(n.usedPorts, port)
+		}
 		n.mu.Unlock()
 	}()
 	var data [maxDatagram + 1]byte
@@ -418,37 +431,15 @@ func (n *Node) forward(r *room, target *member, from netip.AddrPort, data []byte
 	if r.closed || target.closed {
 		return
 	}
-	var candidates []*member
-	for _, candidate := range r.members {
-		if candidate != target && candidate.endpoint.Addr() == from.Addr() {
-			candidates = append(candidates, candidate)
-		}
-	}
 	var sender *member
-	for _, candidate := range candidates {
-		if candidate.peers[target.key] == from || candidate.endpoint == from {
+	for _, candidate := range r.members {
+		if candidate != target && candidate.endpoint == from {
 			if sender != nil {
 				r.bad++
 				return
 			}
 			sender = candidate
 		}
-	}
-	if sender == nil && len(candidates) == 1 {
-		sender = candidates[0]
-	}
-	if sender == nil {
-		var unseen *member
-		for _, candidate := range candidates {
-			if !candidate.heard {
-				if unseen != nil {
-					r.bad++
-					return
-				}
-				unseen = candidate
-			}
-		}
-		sender = unseen
 	}
 	if sender == nil {
 		r.bad++
@@ -462,13 +453,8 @@ func (n *Node) forward(r *room, target *member, from netip.AddrPort, data []byte
 		return
 	}
 	sender.budget -= float64(len(data))
-	sender.endpoint, sender.peers[target.key], sender.heard = from, from, true
 	r.last = now
-	destination := target.endpoint
-	if learned := target.peers[sender.key]; learned.IsValid() {
-		destination = learned
-	}
-	_, _ = sender.socket.WriteToUDPAddrPort(data, destination)
+	_, _ = sender.socket.WriteToUDPAddrPort(data, target.endpoint)
 	r.forwarded++
 }
 
@@ -485,15 +471,16 @@ func (n *Node) remove(id string, raw members) {
 			m.closed = true
 			m.socket.Close()
 		}
-		for _, m := range r.members {
-			delete(m.peers, key)
-		}
 	}
 }
 
 func (n *Node) close(id string) message {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	return n.closeLocked(id)
+}
+
+func (n *Node) closeLocked(id string) message {
 	r := n.rooms[id]
 	if r == nil {
 		return message{Op: "closed", Room: id}
@@ -535,16 +522,12 @@ func (n *Node) sweep(ctx context.Context) {
 			return
 		case now := <-ticker.C:
 			n.mu.Lock()
-			var expired []string
 			for id, r := range n.rooms {
 				if now.Sub(r.last) >= idleTime {
-					expired = append(expired, id)
+					n.closeLocked(id)
 				}
 			}
 			n.mu.Unlock()
-			for _, id := range expired {
-				n.close(id)
-			}
 		}
 	}
 }

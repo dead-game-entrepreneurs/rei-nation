@@ -26,7 +26,8 @@ FROM community_persona ORDER BY id;
 
 SELECT format(
   'INSERT INTO eanation.buddies(title,a,b,inviter,accepted) VALUES (''tsfp'',%L,%L,%L,%L);',
-  least(low.name, high.name), greatest(low.name, high.name), requester.name, friendship.accepted
+  least(low.name COLLATE "C", high.name COLLATE "C"),
+  greatest(low.name COLLATE "C", high.name COLLATE "C"), requester.name, friendship.accepted
 )
 FROM community_friendship friendship
 JOIN community_persona low ON low.id = friendship.low_id
@@ -46,14 +47,23 @@ JOIN community_persona sender ON sender.id = message.sender_id
 JOIN community_persona recipient ON recipient.id = message.recipient_id
 ORDER BY message.id;
 
+WITH normalized_maps AS (
+  SELECT mapblob.*,
+    casefold(regexp_replace(btrim(metadata->>'name'), '\s+', ' ', 'g') COLLATE "und-x-icu") AS canonical_name_key
+  FROM community_mapblob mapblob
+), maps AS (
+  SELECT normalized_maps.*,
+    row_number() OVER (PARTITION BY canonical_name_key ORDER BY id) AS name_number
+  FROM normalized_maps
+)
 SELECT format(
   'INSERT INTO eanation.tsfp_maps(id,owner,name_key,digest,content,metadata,created_at,downloads,rating_sum,reviews) OVERRIDING SYSTEM VALUE VALUES (%s,%s,%L,%L::bytea,%L::bytea,%L::jsonb,%L::timestamptz,%s,%s,%s);',
   id, persona_id,
-  lower(regexp_replace(btrim(metadata->>'name'), '\s+', ' ', 'g')) || '#legacy-' || id,
+  canonical_name_key || CASE WHEN name_number = 1 THEN '' ELSE '#legacy-' || id END,
   '\x' || encode(sha256(content), 'hex'), '\x' || encode(content, 'hex'), metadata::text, created,
   download_count, round(rating * review_count)::bigint, review_count
 )
-FROM community_mapblob ORDER BY id;
+FROM maps ORDER BY id;
 
 SELECT format(
   'INSERT INTO eanation.tsfp_map_reviews(map_id,voter,rating) VALUES (%s,%s,%s);',

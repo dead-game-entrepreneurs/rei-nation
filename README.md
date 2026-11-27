@@ -193,9 +193,13 @@ instead. Run the exporter against a consistent source snapshot and feed its
 output to an initialized, empty Rei Nation database:
 
 ```sh
+set -e
+umask 077
+import_sql="$(mktemp)"
+trap 'rm -f "$import_sql"' EXIT
 psql -XqAt -v ON_ERROR_STOP=1 "$OLD_DATABASE_URL" \
-  -f scripts/migrate-tsfp-django.sql > tsfp-import.sql
-psql -X -v ON_ERROR_STOP=1 "$REI_NATION_DATABASE_URL" < tsfp-import.sql
+  -f scripts/migrate-tsfp-django.sql > "$import_sql"
+psql -X -v ON_ERROR_STOP=1 "$REI_NATION_DATABASE_URL" < "$import_sql"
 ```
 
 The generated import is transactional and refuses a nonempty account table.
