@@ -1,7 +1,6 @@
 # TimeSplitters: Future Perfect on PlayStation 2
 
-The opt-in `tsfp` adapter targets the US retail PS2 release (`SLUS-21148`). Its
-reference is the [original server's main branch at 1de3a50](https://github.com/princebyyourlogic/tsfp-server-recreation/tree/1de3a50c04a5a3389f927db7ca63a4833771605d).
+The `tsfp` adapter targets the US retail PS2 release (`SLUS-21148`).
 
 ## Startup
 
