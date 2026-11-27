@@ -1,0 +1,92 @@
+# yaml-language-server: $schema=https://www.coderabbit.ai/integrations/schema.v2.json
+language: en-US
+
+reviews:
+  profile: assertive
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+  auto_approvals:
+    enabled: false
+  path_instructions:
+    - path: "**/*.go"
+      instructions: |
+        Follow AGENTS.md and check the ordinary entry point. Flag concrete
+        correctness, compatibility, security, and test gaps. Prefer idiomatic
+        Go, clear ownership, small interfaces at existing boundaries, wrapped
+        errors where context matters, bounded I/O, and cancellation and cleanup
+        on every exit path. Check races, lock order, and concurrent shutdown.
+        Reuse a shared package when its contract already fits. Keep packet and
+        game policy in the title adapter. Extract new shared code for real
+        callers with the same behavior and a testable contract. Flag new or
+        edited handwritten code comments longer than two lines. Put longer
+        compatibility rationale in the title's notes and link to it from code.
+    - path: "{cmd/**,internal/{app,game,protocol,connectivity,storage,games}/**}"
+      instructions: |
+        Check input and frame bounds, session and title authorization, safe
+        defaults, and redacted logs. Legacy transport is scoped to clients that
+        require it. Flag credentials or keys in code, fixtures, or logs.
+        For persistence changes, check parameterized queries, upgrade compatibility,
+        transaction boundaries, and duplicate or retried writes.
+    - path: "{cmd/**,internal/{app,game,connectivity,protocol,games}/**,configs/**,compose.yaml,.env.example,README.md,docs/games/**}"
+      instructions: |
+        For new title support or changes that affect peer connectivity, check
+        the actual client handoff. Prefer adaptive relay for Internet play.
+        Preserve working direct play and use a relay when the stock client
+        detects a failed direct connection. If the client lacks usable fallback,
+        expect a forced relay route for Internet play. If even forced relay is
+        infeasible, ask for the client limitation and mark Internet support limited.
+        Distinguish direct play, relay selected before handoff, client-driven
+        fallback within an attempt, and a fresh attempt routed through a relay.
+        A relay listener, a successful probe, or a mode named auto establishes
+        no fallback on its own. Check which endpoint fields the client consumes,
+        the specific retry or alternate-endpoint path, and evidence from traces,
+        client code, or focused tests. Check both a working direct path and a
+        blocked-direct test with the relay reachable when fallback is claimed.
+        Flag unsupported or unverified outcomes in status claims.
+        For forwarding changes, check admitted peers, expected source and
+        destination ports, shared public IPs and CGNAT, expiry, and failure cleanup.
+    - path: "{.env.example,compose.yaml,Dockerfile,configs/**,.github/workflows/**,scripts/**}"
+      instructions: |
+        Check that changed settings agree across code, Compose, and the README.
+        Verify client-facing listener and DNS changes use documentation examples.
+        Check localhost-only database and health exposure, least privilege,
+        credential handling, and isolation of test stacks from live services.
+  pre_merge_checks:
+    custom_checks:
+      - name: Relay support and evidence
+        mode: warning
+        instructions: |
+          Apply this check when the PR adds a title or changes the peer handoff,
+          NAT traversal, or relay behavior. Pass other changes as not applicable.
+          For an applicable PR, look for a relay assessment in its description
+          or changed title notes. Pass when it documents a supported adaptive
+          route with evidence of how the stock client switches after direct
+          failure, or explains why fallback is unavailable and documents how
+          to enable forced relay for Internet play. If forced relay is also
+          infeasible, require the client limitation and a limited Internet play
+          status. Treat unproven feasibility as open and state what test is
+          pending. Require direct and blocked-direct outcomes or explicit
+          pending test status for adaptive claims. Fail if the assessment is
+          missing, a supported forced route is omitted when fallback is
+          unavailable, or the claims exceed the evidence. Name the title and
+          the missing route or evidence.
+  tools:
+    golangci-lint:
+      enabled: true
+    gitleaks:
+      enabled: true
+    semgrep:
+      enabled: true
+    trivy:
+      enabled: true
+    actionlint:
+      enabled: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - files: "docs/games/nascar04/online-map.md"
+        applyTo: "internal/games/nascar04/**"
