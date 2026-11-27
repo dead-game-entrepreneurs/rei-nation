@@ -44,7 +44,12 @@ almost any NAT.
    their private addresses and need no forwarding.
 4. Set `REI_NATION_GAMES=gera` and `REI_NATION_BIND=0.0.0.0` (or the address
    that receives the forwarded traffic).
-5. Open these ports to the players:
+5. With Docker Compose, the relay settings are passed through
+   [compose.yaml](../../../compose.yaml). Set
+   `REI_NATION_GERA_RELAY_DIR=/gera-relay` and set
+   `REI_NATION_GERA_RELAY_HOST_DIR` to the host directory that
+   `rei-relay setup` wrote. That directory is mounted read-only.
+6. Open these ports to the players:
 
    | Port | Protocol | Service |
    | --- | --- | --- |
@@ -52,16 +57,16 @@ almost any NAT.
    | 18041 | TCP | Theater game browser |
    | 18041 | UDP | Theater `ECHO` and endpoint keepalive |
    | 18042 | TCP | Messenger |
-   | 18043 | TCP | Relay node sign-in (only with a relay; open to the node's IP) |
+   | 18043 | TCP | Relay node sign-in (reserved only when `REI_NATION_GERA_RELAY_DIR` is set; open it to the node's IP) |
 
    PostgreSQL and the health endpoint stay on `127.0.0.1`; do not expose them.
-6. Keep TCP keepalive and the UDP keepalive running (both are on by default).
+7. Keep TCP keepalive and the UDP keepalive running (both are on by default).
    The server pokes each console's UDP port every 45 seconds, which keeps
    PCSX2 from closing it during a level load and keeps router mappings open.
 
 To keep a log file when running outside Docker, set `REI_NATION_LOG_FILE`.
 
-## Relay fallback
+## Relay
 
 The relay is a port of the TimeSplitters server's relay, which serves the
 same FESL library. It runs as a separate program, `rei-relay`, on a machine
@@ -77,7 +82,8 @@ work. A small cloud VM is enough.
 
    This writes `relay/control-cert.pem`, `relay/control-key.pem`,
    `relay/tokens.txt` and `relay/relay1-token.txt`. Keep the directory out
-   of version control (it is in `.gitignore`).
+   of version control (it is in `.gitignore`). Node names may use 1 to 32
+   ASCII letters, digits, `.`, `_` and `-`.
 2. Set `REI_NATION_GERA_RELAY_DIR=relay` and restart the server. Open
    **TCP 18043** to the node's IP; nodes sign in there over TLS.
 3. Copy `control-cert.pem` and `relay1-token.txt` to the node, delete the
@@ -98,18 +104,59 @@ closes a room after three minutes without traffic.
 
 How a join uses the relay (logged as `relay decision`):
 
-- **Direct** is the default. Players on the same public IP always go direct.
+- **Direct** is the default. Players on the same public IP go direct unless a
+  force rule applies.
+- **Forced relay**: personas in `REI_NATION_GERA_RELAY_FORCE` (or every join
+  with `*`) are always relayed, including on a shared public IP. The relay is
+  chosen before the handoff. If no relay is configured or connected, the join
+  is refused with `EGAM jden` and logged, rather than sent direct. How the game
+  words that refusal is untested.
+- **Relay after a failed join**: a joiner whose last direct join failed
+  (approved but left without entering within 30 seconds) gets relay addresses.
+  That memory lasts 24 hours and is lost on restart.
 - **Fallback**: when the relay's probe after `CGAM` shows the host's router
   accepts packets from the relay, the joiner gets the host's direct address
-  plus the host's relay port as its alternate. The game tries the alternate
-  only if the direct probes fail.
-- **Relay**: both consoles get relay addresses. This is used for personas in
-  `REI_NATION_GERA_RELAY_FORCE` (or every join with `*`), and for a joiner
-  whose last direct join failed (approved but left without entering within
-  30 seconds). That memory lasts 24 hours and is lost on restart.
+  plus the host's relay port as its alternate. The client itself switches to
+  the alternate only within that attempt, if its direct probes fail. A
+  fallback is offered only while the host's current endpoint matches the one
+  probed, and only on a relay that passed the probe. A match's existing room on
+  another relay is not reused for fallback.
+- A host created before any relay connected, or whose endpoint has changed, is
+  probed on the next join. That join stays direct; later ones can use the
+  result. One probe per match runs at a time, and a probe is skipped if the
+  host left during its 2-second delay.
 
-Not yet tested in game: relay rooms, probes and both join modes are covered
-by loopback tests only.
+Not yet tested in game: relay rooms, probes and all relayed join modes are
+covered by loopback tests only.
+
+### Relay directory
+
+`tokens.txt` has one line per node: `name sha256:<token hash> <public ip>`. The
+server keeps only the hash. A node is accepted only from its registered IP,
+which is also the address players are sent to.
+
+The hub stops cleanly on a fatal accept error. A node whose control link is
+replaced by a reconnect loses its old rooms, which are marked closed. If a new
+room fails partway through opening, the hub closes it on the node, which
+releases any ports it bound. A node that loses its control link backs off up to
+one minute between attempts. The backoff starts over at one second after a link
+that stayed up longer than that.
+
+### Shared public IPs
+
+Players behind one router share a public IP and may use new source ports toward
+the theater or a relay. The theater records an anonymous `ECHO` only for a
+connection already seen on that IP and port. A new port could belong to a seen
+console whose NAT moved, so it is not given to a connection that has not been
+seen. The console still gets the reply and reports its own port in `EGAM`.
+
+A relay node picks a datagram's sender by exact endpoint first, then by IP. A
+datagram sent to X's port is not from X, and beyond that a member not yet heard
+from is preferred.
+
+Same-router joins stay direct. The exception is two PCSX2 instances in Sockets
+mode after a failed join. They share one virtual address and would need the
+router to hairpin, while both sending out to a relay needs no hairpin.
 
 ## Players
 
@@ -142,8 +189,11 @@ Treat this as a test service.
 - The theater and messenger are plaintext. Session keys authenticate players
   there and are random per login, but anyone who can see the traffic can
   reuse them.
-- There is no rate limiting or abuse protection. Watch the logs during a
-  test.
+- Connections that have not signed in are closed after 10 minutes (FESL) or
+  one minute (messenger and theater). Session keys are revoked at logout and
+  expire 10 minutes after their FESL connection closes.
+- Relay control sign-in is throttled after repeated failures. Otherwise there
+  is no rate limiting or abuse protection. Watch the logs during a test.
 - Logs contain account and persona names, connection IDs and endpoints, but
   not passwords, session keys, secrets or tickets.
 

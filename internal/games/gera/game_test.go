@@ -20,7 +20,7 @@ func TestHelloPingGoodbye(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	def := Definition()
+	def := Definition(false)
 	h := def.New(game.Options{PublicIP: netip.MustParseAddr("192.0.2.10"), Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -89,15 +89,14 @@ func TestHelloPingGoodbye(t *testing.T) {
 	}
 }
 
-// TestServeOverSSL drives the whole path a retail client takes: Definition.Serve
-// wraps the listener in SSL, the client negotiates SSL 2.0, then sends Hello and
-// reads the reply over the encrypted stream.
+// TestServeOverSSL drives the retail path: SSL 2.0 handshake, then Hello and
+// its reply over the encrypted stream.
 func TestServeOverSSL(t *testing.T) {
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	def := Definition()
+	def := Definition(false)
 	h := def.New(game.Options{PublicIP: netip.MustParseAddr("192.0.2.10"), Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

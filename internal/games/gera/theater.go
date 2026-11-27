@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"strconv"
@@ -18,15 +19,8 @@ import (
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/protocol/fesl"
 )
 
-// theater is the EA game-browser service. After the messenger brings the
-// persona online, the client opens the theater (TCP) to list, host and join
-// games, and uses the theater's UDP port to learn its own public endpoint so
-// peers can reach it. Like the messenger it is plaintext Aries framing with the
-// command in the frame tag; the server also sends a PING heartbeat.
-//
-// This targets a LAN of separate machines, where consoles reach each other
-// directly by address, so there is no relay or NAT-traversal fallback. The
-// server exchanges each peer's UDP-observed endpoint. See the online map.
+// theater is the EA game browser on TCP and UDP 18041: listing, hosting, joining
+// and endpoint discovery. See docs/games/gera/online-map.md#theater-game-browser.
 type theater struct {
 	srv *server
 
@@ -91,8 +85,13 @@ type hostedGame struct {
 	// the relays have probed the host, then the relays it answered.
 	relayRoom      *relay.Room
 	relayReachable map[string]bool
+	relayProbedEP  netip.AddrPort // the host endpoint relayReachable was measured at
 	relayProbedAt  time.Time
+	relayProbing   bool
 	relayMu        sync.Mutex // serializes opening and growing relayRoom
+
+	// canceled holds PIDs whose joiner cancelled while the host was deciding.
+	canceled map[int]time.Time
 }
 
 type gamePlayer struct {
@@ -153,13 +152,8 @@ type kick struct {
 	pid  int
 }
 
-// leaveGame removes c from a game it joined and returns the KICK notices owed
-// to the host. Only approved guests are reported: the host allocates a player
-// record when it approves a join and keeps that seat reserved until told the
-// guest left, so a guest that cancels or drops without one shrinks the game
-// for good. Pending guests are not reported because the host may never have
-// allocated them. The retail client ignores a KICK for an unknown PID, so a
-// race with the host's own departure report is harmless. Callers hold h.mu.
+// leaveGame removes c and returns KICKs for approved guests, whose seats the host
+// holds until told. Pending guests are remembered as cancelled. Callers hold h.mu.
 func (h *theater) leaveGame(g *hostedGame, c *aries.Client) []kick {
 	var out []kick
 	for pid, p := range g.players {
@@ -172,14 +166,27 @@ func (h *theater) leaveGame(g *hostedGame, c *aries.Client) []kick {
 			}
 		}
 	}
+	now := time.Now()
+	for pid, t := range g.canceled {
+		if now.Sub(t) > canceledJoinMemory {
+			delete(g.canceled, pid)
+		}
+	}
 	for pid, p := range g.pending {
 		if p.writer == c {
 			h.releaseRelay(g, pid)
 			delete(g.pending, pid)
+			if c != g.owner {
+				g.canceled[pid] = now
+			}
 		}
 	}
 	return out
 }
+
+// canceledJoinMemory is how long a late host approval of a cancelled join is
+// recognised and answered with KICK.
+const canceledJoinMemory = 2 * time.Minute
 
 func (h *theater) sendKicks(kicks []kick, reason string) {
 	for _, k := range kicks {
@@ -196,10 +203,8 @@ type removal struct {
 	gid int
 }
 
-// closeGame deletes a hosted game and returns the GREM notices owed to its
-// other players and pending joiners, each in the lobby that player used.
-// Without one a joiner finds the host gone at the end of a match and reports
-// an error instead of returning cleanly. Callers hold h.mu.
+// closeGame deletes g and returns the GREM notices owed to its other players and
+// pending joiners, each in its own lobby. Callers hold h.mu.
 func (h *theater) closeGame(g *hostedGame) []removal {
 	delete(h.games, g.gid)
 	if g.relayRoom != nil {
@@ -289,6 +294,7 @@ func (h *theater) user(c *aries.Client, m fesl.Message, tid string) {
 	t.id = id
 	t.authed = true
 	h.mu.Unlock()
+	c.ClearInitialReadDeadline()
 	h.srv.opts.Log.Info("theater auth", "conn", c.ID(), "persona", id.personaName, "persona_id", id.personaID)
 	c.Send(fesl.Packet("USER", msgOK, field("TID", tid), field("NAME", id.personaName)))
 	if h.srv.relays.Available() {
@@ -296,18 +302,12 @@ func (h *theater) user(c *aries.Client, m fesl.Message, tid string) {
 	}
 }
 
-// lobbyName is the lobby the client will host and join in. After each lobby
-// list the client's online manager (FUN_00338920) picks the first lobby that
-// passes one of two checks, depending on its mode flags: NAME equals its region
-// string from FUN_00331a98 ("NorthAmerica" on this disc, "Asia" otherwise), or
-// FAVORITE-PLAYERS (lobby field +0x34) is non-zero. With no match it records
-// error 'nrom', never sends CGAM, and the host times out after the level loads.
-// The single lobby satisfies both checks.
+// lobbyName matches this disc's region string; with no matching lobby the client
+// fails with nrom. See docs/games/gera/online-map.md#lobbies.
 const lobbyName = "NorthAmerica"
 
-// lobbies are offered in order; LID is the index plus one. The client takes
-// the first one that passes its check, so "Asia" covers a console whose
-// language setting makes it pick that region string instead.
+// lobbies are offered in order, LID = index + 1; "Asia" covers consoles whose
+// language setting selects that region string.
 var lobbies = []string{lobbyName, "Asia"}
 
 func (h *theater) lobbyList(c *aries.Client, tid string) {
@@ -328,9 +328,8 @@ func (h *theater) gameList(c *aries.Client, m fesl.Message, tid string) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	// Every lobby lists every game. Consoles pick their lobby from their own
-	// region setting, so a host and a joiner on the same network can land in
-	// different lobbies; a shared pool lets them still see each other.
+	// Every lobby lists every game, since consoles on one network can pick
+	// different lobbies from their region settings.
 	n := strconv.Itoa(len(h.games))
 	c.Send(fesl.Packet("GLST", msgOK, field("TID", tid), field("LID", lid),
 		field("NUM-GAMES", n), field("LOBBY-MAX-GAMES", "100"), field("LOBBY-NUM-GAMES", n)))
@@ -439,14 +438,13 @@ func (h *theater) createGame(c *aries.Client, m fesl.Message, tid string) {
 		secret: newSecret(), internalIP: intIP, internalPort: intPort, join: "O",
 		attrs: m.Prefixed("b-"), details: map[string]string{},
 		players: map[int]*gamePlayer{}, pending: map[int]*gamePlayer{}, nextPID: 2,
+		canceled: map[int]time.Time{},
 	}
 	created := h.games[gid]
 	secret := created.secret
+	h.startProbe(created)
 	h.mu.Unlock()
 	sendRemovals(notices)
-	if h.srv.relays.Available() {
-		go h.probeHost(created)
-	}
 
 	h.srv.opts.Log.Info("theater game created", "conn", c.ID(), "gid", gid, "name", name, "host", t.id.personaName)
 	c.Send(fesl.Packet("CGAM", msgOK, field("TID", tid), field("LID", lid), field("GID", strconv.Itoa(gid)),
@@ -489,45 +487,56 @@ func (h *theater) enterGame(c *aries.Client, m fesl.Message, tid string) {
 			return
 		}
 	}
+	joinerIP := c.Addr().String()
+	id := t.id // EGRQ uses the identity admitted here, even if USER changes it later
+	relayEP, relayable := h.publicEndpoint(h.externalOf(c, joinerIP, port))
+	mode, reason := "", ""
+	if !self {
+		mode, reason = h.relayDecision(g, id, joinerIP)
+		if mode == "refuse" || (!relayable && strings.HasPrefix(reason, "forced_")) {
+			h.mu.Unlock()
+			h.srv.opts.Log.Warn("theater join refused: forced relay unavailable", "conn", c.ID(), "gid", gid,
+				"persona_id", id.personaID, "reason", reason)
+			c.Send(fesl.Packet("EGAM", 0x6A64656E, field("TID", tid), field("REASON", "c"))) // "jden"
+			return
+		}
+		if !relayable {
+			mode = ""
+		}
+		switch {
+		case reason == "host_not_probed" || reason == "host_endpoint_changed":
+			h.startProbe(g)
+		case mode != "" && time.Since(g.relayProbedAt) > relayProbeRefresh:
+			h.startProbe(g) // mappings and routers change in a long match
+		}
+	}
 	pid := 1
 	if !self {
 		pid = g.nextPID
 		g.nextPID++
 	}
-	joinerIP := c.Addr().String()
 	ticket := newSecret()
 	if !validID(lid) {
 		lid = g.lid
 	}
-	joiner := &gamePlayer{writer: c, name: t.id.personaName, uid: t.id.personaID, ip: joinerIP, port: port, ticket: ticket, lid: lid, attrs: map[string]string{}}
+	joiner := &gamePlayer{writer: c, name: id.personaName, uid: id.personaID, ip: joinerIP, port: port,
+		ticket: ticket, lid: lid, attrs: map[string]string{}, relayMode: mode}
 	g.pending[pid] = joiner
 	ext := h.reachable(h.externalOf(c, joinerIP, port), h.connIP[g.owner])
-	relayEP, relayable := h.publicEndpoint(h.externalOf(c, joinerIP, port))
 	owner := g.owner
-	mode, reason := "", ""
-	if !self {
-		mode, reason = h.relayDecision(g, t.id, joinerIP)
-		if !relayable {
-			mode = ""
-		}
-		joiner.relayMode = mode
-		if mode != "" && time.Since(g.relayProbedAt) > relayProbeRefresh {
-			go h.probeHost(g) // mappings and routers change in a long match
-		}
-	}
 	reachable := g.relayReachable
 	hasRoom := g.relayRoom != nil
 	h.mu.Unlock()
 
 	c.Send(fesl.Packet("EGAM", msgOK, field("TID", tid), field("REASON", "0"), field("QPOS", "0"), field("QLEN", "0")))
-	h.srv.opts.Log.Info("theater join request", "conn", c.ID(), "gid", gid, "pid", pid, "persona", t.id.personaName)
+	h.srv.opts.Log.Info("theater join request", "conn", c.ID(), "gid", gid, "pid", pid, "persona", id.personaName)
 	if h.srv.relays != nil && !self {
-		h.srv.opts.Log.Info("relay decision", "gid", gid, "pid", pid, "persona_id", t.id.personaID,
+		h.srv.opts.Log.Info("relay decision", "gid", gid, "pid", pid, "persona_id", id.personaID,
 			"mode", modeName(mode), "reason", reason)
 	}
 	egrq := func(a addr) aries.Frame {
-		return fesl.Packet("EGRQ", msgOK, field("TID", "0"), field("NAME", t.id.personaName),
-			field("UID", strconv.FormatInt(t.id.personaID, 10)), field("PID", strconv.Itoa(pid)),
+		return fesl.Packet("EGRQ", msgOK, field("TID", "0"), field("NAME", joiner.name),
+			field("UID", strconv.FormatInt(joiner.uid, 10)), field("PID", strconv.Itoa(pid)),
 			field("TICKET", ticket), field("IP", a.ip), field("PORT", strconv.Itoa(a.port)))
 	}
 	switch {
@@ -550,13 +559,15 @@ func (h *theater) enterGame(c *aries.Client, m fesl.Message, tid string) {
 				joiner.relayMode = ""
 			}
 			relayed := joiner.relayed
+			if still {
+				owner.Send(egrq(address)) // under h.mu, so it cannot follow a removal notice
+			}
 			h.mu.Unlock()
 			if !still {
 				return
 			}
 			h.srv.opts.Log.Info("theater join relayed", "gid", gid, "pid", pid, "relayed", relayed,
 				"address", address.ip+":"+strconv.Itoa(address.port))
-			owner.Send(egrq(address))
 		}()
 		return
 	case mode == "fallback":
@@ -596,7 +607,24 @@ func (h *theater) joinResponse(c *aries.Client, m fesl.Message, tid string) {
 		}
 	}
 	if g == nil {
+		late := false
+		for _, candidate := range h.games {
+			if _, ok := candidate.canceled[pid]; ok && candidate.owner == c {
+				delete(candidate.canceled, pid)
+				late, g = true, candidate
+				break
+			}
+		}
 		h.mu.Unlock()
+		if late {
+			// The joiner cancelled before this answer; free any seat the host reserved.
+			if tid != "0" {
+				c.Send(fesl.Packet("EGRS", msgOK, field("TID", tid)))
+			}
+			if approved {
+				h.sendKicks([]kick{{host: c, gid: g.gid, pid: pid}}, "cancelled_before_approval")
+			}
+		}
 		return
 	}
 	pending := g.pending[pid]
@@ -664,6 +692,14 @@ func (h *theater) joinResponse(c *aries.Client, m fesl.Message, tid string) {
 			}
 			h.srv.opts.Log.Info("theater join fallback", "gid", gid, "pid", pid, "relay", room != nil,
 				"alternate", alt.ip+":"+strconv.Itoa(alt.port))
+			// Answer under h.mu only while the match and player are current, so
+			// the answer cannot follow a GREM.
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			if h.games[gid] != g || g.players[pid] != pending {
+				h.srv.opts.Log.Info("theater join answer dropped: join ended while waiting", "gid", gid, "pid", pid)
+				return
+			}
 			h.sendJoinAnswer(c, joiner, self, lid, gid, pid, ticket, reason, primary, alt, approved)
 		}()
 		return
@@ -751,12 +787,12 @@ func (h *theater) hostReport(c *aries.Client, m fesl.Message, tid string) {
 		}
 		switch m.Service {
 		case "UGDE":
-			for k, v := range m.Prefixed("d-") {
-				g.details[k] = v
+			if !mergeBounded(g.details, m.Prefixed("d-")) {
+				h.srv.opts.Log.Warn("theater details update dropped: too large", "conn", c.ID(), "gid", g.gid)
 			}
 		case "UGAM":
-			for k, v := range m.Prefixed("b-") {
-				g.attrs[k] = v
+			if !mergeBounded(g.attrs, m.Prefixed("b-")) {
+				h.srv.opts.Log.Warn("theater attribute update dropped: too large", "conn", c.ID(), "gid", g.gid)
 			}
 			if j, ok := m.GetFold("join"); ok {
 				switch j {
@@ -769,10 +805,8 @@ func (h *theater) hostReport(c *aries.Client, m fesl.Message, tid string) {
 			}
 		case "UPLA":
 			if pid, ok := parseInt(m, "pid"); ok {
-				if p := g.players[pid]; p != nil {
-					for k, v := range m.Prefixed("p-") {
-						p.attrs[k] = v
-					}
+				if p := g.players[pid]; p != nil && !mergeBounded(p.attrs, m.Prefixed("p-")) {
+					h.srv.opts.Log.Warn("theater player update dropped: too large", "conn", c.ID(), "gid", g.gid, "pid", pid)
 				}
 			}
 		}
@@ -810,11 +844,8 @@ func (h *theater) externalOf(c *aries.Client, fallbackIP string, fallbackPort in
 	return addr{fallbackIP, fallbackPort}
 }
 
-// hostAddresses returns the primary and alternate host endpoints for a joiner.
-// With separate machines the joiner uses the host's observed public endpoint;
-// the PCSX2 virtual internal address is never sent to another console, because
-// every console shares it and a second emulator would admit itself. Only the
-// host's own self-join may receive the internal address. Callers hold h.mu.
+// hostAddresses returns the host endpoints for a joiner. The shared PCSX2 internal
+// address goes only to the host's own self-join. Callers hold h.mu.
 func (h *theater) hostAddresses(g *hostedGame, joinerIP string, self bool) (primary, alternate addr) {
 	external := h.externalOf(g.owner, g.hostIP, g.port)
 	internal := addr{g.internalIP, g.internalPort}
@@ -833,13 +864,8 @@ func (h *theater) hostAddresses(g *hostedGame, joinerIP string, self bool) (prim
 	return primary, alternate
 }
 
-// reachable returns an endpoint a viewer can use. The server sees consoles on
-// its own network by their private addresses, and those consoles share the
-// server's public address on the Internet. A viewer outside that network gets
-// the public address with the same port instead, which works when the router
-// forwards that port to the console (UDP 18040 for a host). Viewers on the
-// private network keep the private address, which needs no forwarding.
-// Callers hold h.mu.
+// reachable swaps a LAN endpoint for the public address and same port when the
+// viewer is outside the server's network. Callers hold h.mu.
 func (h *theater) reachable(a addr, viewerIP string) addr {
 	ip, err := netip.ParseAddr(a.ip)
 	viewer, verr := netip.ParseAddr(viewerIP)
@@ -853,10 +879,8 @@ func (h *theater) reachable(a addr, viewerIP string) addr {
 	return a
 }
 
-// udpKeepAlive keeps each console's theater UDP socket alive. PCSX2 unbinds a
-// "fixed port" after about 120 seconds with no traffic, which otherwise drops
-// the game's session during a level load. A periodic ECHO to the observed
-// endpoint resets that idle timer without the game treating it as new state.
+// udpKeepAlive ECHOes each observed endpoint so PCSX2 does not unbind its fixed
+// port after about 120 s of silence during a level load.
 func (h *theater) udpKeepAlive(ctx context.Context, conn *net.UDPConn) error {
 	ticker := time.NewTicker(45 * time.Second)
 	defer ticker.Stop()
@@ -907,9 +931,8 @@ func (h *theater) handleEcho(conn *net.UDPConn, from netip.AddrPort, data []byte
 	if !validID(tid) {
 		tid = "0"
 	}
-	// TYPE selects the client's AriesUdp handler: 1 is the game browser's
-	// demangler, which learns its public port from the reply. A missing TYPE is
-	// channel 0; any other value is not a request this server understands.
+	// TYPE 1 is the game browser's demangler and missing TYPE is channel 0; other
+	// values are not requests this server understands.
 	msgType, ok := m.GetFold("type")
 	if !ok || msgType == "" {
 		msgType = "0"
@@ -937,14 +960,8 @@ func (h *theater) handleEcho(conn *net.UDPConn, from netip.AddrPort, data []byte
 	}
 }
 
-// attributeEcho maps an ECHO datagram to a theater connection: by host secret
-// when present, otherwise by source IP. Several players behind one router share
-// a public IP, so an anonymous ECHO then goes to the connection already seen on
-// that source port, or else to the only connection from that IP not yet seen.
-// Anything still ambiguous is dropped: a wrong attribution would hand one
-// player's endpoint to another. The client also learns its own public port
-// from the reply and advertises it in EGAM, so a dropped observation still
-// leaves a usable address. Callers hold h.mu.
+// attributeEcho maps an ECHO to a connection by host secret, else by source IP and
+// port. Ambiguous datagrams are dropped (internet-play.md#shared-public-ips).
 func (h *theater) attributeEcho(m fesl.Message, srcIP string, srcPort int) *aries.Client {
 	gid, hasGID := parseInt(m, "ugid")
 	secret, _ := m.GetFold("secret")
@@ -969,19 +986,38 @@ func (h *theater) attributeEcho(m fesl.Message, srcIP string, srcPort int) *arie
 			unseen = append(unseen, conn)
 		}
 	}
+	// An unknown port on a shared IP is not given to an unseen connection: it may
+	// be a seen console whose NAT moved, and EGAM carries the client's own port.
 	switch {
 	case len(candidates) == 1:
 		return candidates[0]
 	case len(samePort) == 1:
 		return samePort[0]
-	case len(samePort) == 0 && len(unseen) == 1:
-		return unseen[0]
 	}
 	if len(candidates) > 1 {
 		h.srv.opts.Log.Info("theater UDP observation ambiguous", "source", srcIP+":"+strconv.Itoa(srcPort),
 			"candidates", len(candidates), "same_port", len(samePort), "unseen", len(unseen))
 	}
 	return nil
+}
+
+// maxAccumulated bounds each merged attribute map so GDAT, GDET and PDAT replies
+// stay well below aries.MaxFrame.
+const maxAccumulated = 16 * 1024
+
+// mergeBounded applies add to dst unless the encoded result would exceed maxAccumulated.
+func mergeBounded(dst, add map[string]string) bool {
+	merged := maps.Clone(dst)
+	maps.Copy(merged, add)
+	fields := make([]fesl.Field, 0, len(merged))
+	for k, v := range merged {
+		fields = append(fields, fesl.Field{Key: "b-" + k, Value: v})
+	}
+	if len(fesl.Packet("GDAT", msgOK, fields...).Body) > maxAccumulated {
+		return false
+	}
+	maps.Copy(dst, add)
+	return true
 }
 
 func playerCounts(g *hostedGame) (active, joining int) {

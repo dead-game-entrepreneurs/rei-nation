@@ -20,19 +20,8 @@ var (
 	oidRSAEncryption = []byte{0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01}
 )
 
-// GenerateCertificate builds the leaf certificate and key the PS2 FESL client
-// accepts. The client's DirtySock SSL module (ProtoSSL) has a parser bug,
-// documented at https://github.com/Aim4kill/Bug_OldProtoSSL, that skips
-// signature verification when the outer certificate-signature algorithm is one
-// it does not recognize. This builds an ordinary certificate chain, then
-// rewrites the DER so the inner signature algorithm reads MD5-with-RSA and the
-// outer one reads rsaEncryption, matching the layout that the retail client
-// accepts. The certificate is otherwise not valid and must never be used off an
-// isolated test network. The key is generated fresh and is not written to disk.
-//
-// The parser also requires both validity dates in ASN.1 UTCTime (year before
-// 2050) and the subject and issuer names as PrintableString; Go emits both for
-// the values used here.
+// GenerateCertificate builds a throwaway certificate laid out for the PS2 ProtoSSL
+// parser bug. See docs/games/gera/online-map.md#ssl-transport.
 func GenerateCertificate(hostname string) (certDER []byte, key *rsa.PrivateKey, err error) {
 	issuerKey, err := rsa.GenerateKey(rand.Reader, 1024)
 	if err != nil {
@@ -92,11 +81,8 @@ func GenerateCertificate(hostname string) (certDER []byte, key *rsa.PrivateKey, 
 	return patched, leafKey, nil
 }
 
-// applyProtoSSLWorkaround rewrites the two signature-algorithm identifiers in a
-// certificate DER. A certificate holds exactly two: the inner one in
-// tbsCertificate and the outer one beside the signature. SHA1-with-RSA is used
-// for both at signing time; the public-key OID in SubjectPublicKeyInfo is
-// rsaEncryption and is left untouched because it does not match the search.
+// applyProtoSSLWorkaround rewrites the inner signature OID to MD5-with-RSA and the
+// outer one to rsaEncryption; the public-key OID does not match the search.
 func applyProtoSSLWorkaround(der []byte) ([]byte, error) {
 	var offsets []int
 	for i := 0; ; {

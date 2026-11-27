@@ -210,9 +210,8 @@ func (n *Node) read(r *room, target *member) {
 	}
 }
 
-// sender finds the member a datagram came from: by exact endpoint, else by IP.
-// Players behind one router share an IP and may use new ports toward the relay.
-// A datagram to X's port is not from X; beyond that, prefer one not yet heard.
+// sender finds a datagram's member by exact endpoint, else by shared IP.
+// See docs/games/gera/internet-play.md#shared-public-ips.
 func (r *room) sender(from netip.AddrPort, target *member) *member {
 	var candidates []*member
 	for _, m := range r.members {
@@ -486,21 +485,24 @@ func (n *Node) Run(ctx context.Context, cfg ControlConfig) error {
 		return err
 	}
 	go n.sweep(ctx)
+	const maxDelay = time.Minute
 	delay := time.Second
 	for ctx.Err() == nil {
+		started := time.Now()
 		err := n.serveControl(ctx, cfg, tlsConf)
 		if ctx.Err() != nil {
 			break
+		}
+		// A link that stayed up longer than the longest backoff starts over at 1 s.
+		if time.Since(started) > maxDelay {
+			delay = time.Second
 		}
 		n.Log.Info("relay control link down; retrying", "error", err, "delay", delay)
 		select {
 		case <-ctx.Done():
 		case <-time.After(delay):
 		}
-		delay = min(delay*2, time.Minute)
-		if err == nil {
-			delay = time.Second
-		}
+		delay = min(delay*2, maxDelay)
 	}
 	n.mu.Lock()
 	for id := range n.rooms {

@@ -13,18 +13,12 @@ import (
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/storage"
 )
 
-// The rank service stores keyed persona stats and serves them back as ranked
-// stats and leaderboards. GoldenEye uses the same FESL rank library and field
-// names as TimeSplitters: Future Perfect (u.N.s.M.k/v/ut/t, stats.N.*,
-// keys.N, minRank/maxRank), so this follows that server's handling. Which keys
-// GoldenEye reports and which update types it uses are logged on each report
-// until a live capture settles them.
+// The rank service stores persona stats and serves ranked stats and leaderboards.
+// See docs/games/gera/online-map.md#rank for the TimeSplitters-derived rules.
 const (
 	// ownerPersona is the rank owner type for a persona.
 	ownerPersona = 1
-	// updateAdd accumulates the reported value. GoldenEye sends it for most
-	// match totals and updateReplace for current loss streaks, which reset, so
-	// 5 is taken to replace the value. updateSet (0) is assumed to replace too.
+	// Type 3 adds to the stored value; 5 (loss streaks) and 0 (assumed) replace it.
 	updateSet     = 0
 	updateAdd     = 3
 	updateReplace = 5
@@ -152,10 +146,8 @@ func (s *server) updateStats(ctx context.Context, c *aries.Client, m fesl.Messag
 	c.Send(fesl.Reply(m, m.TXN))
 }
 
-// deriveStats keeps the stats the client reads but never reports. For each
-// mode prefix P with reported wins (P_W) or games (P_T_G), P_W_PERC is the
-// win fraction from 0 to 1 (the leaderboard shows it times 100) and P_RANK,
-// which orders the leaderboards, is the win count. The original service's ranking formula is unknown.
+// deriveStats fills <MODE>_W_PERC (win fraction) and <MODE>_RANK (wins), which the
+// client reads but never reports. See docs/games/gera/online-map.md#rank.
 func (s *server) deriveStats(ctx context.Context, owner int64, updates []storage.StatUpdate) error {
 	prefixes := map[string]bool{}
 	for _, u := range updates {

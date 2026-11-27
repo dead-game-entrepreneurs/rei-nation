@@ -1,7 +1,5 @@
-// Package gera implements EA FESL for GoldenEye: Rogue Agent on PS2.
-//
-// The US disc (SLUS-21064) registers its FESL hub as clientString "gera" and
-// connects to TCP 18040. See docs/games/gera/online-map.md for the evidence.
+// Package gera implements EA FESL for GoldenEye: Rogue Agent (US PS2, SLUS-21064).
+// See docs/games/gera/online-map.md for the client evidence.
 package gera
 
 import (
@@ -28,28 +26,33 @@ const (
 	// sslName is the certificate name the client passes to its SSL module. DNS
 	// redirection changes where the name resolves, not the name itself.
 	sslName = "fesl.ea.com"
-	// The client takes the theater and messenger endpoints from the Hello
-	// reply. Rei Nation does not serve either yet; these are the addresses it
-	// will use once it does.
+	// The Hello reply hands the client these theater and messenger ports.
 	theaterPort   = 18041
 	messengerPort = 18042
-	// relayControlPort (relaypolicy.go) is where relay nodes sign in; it
-	// is served only when REI_NATION_GERA_RELAY_DIR is set.
-	// No application read deadline on any of the three connections: the client
-	// goes silent for minutes while loading a level and expects its session to
-	// survive. aries enables TCP keepalive, which drops a genuinely dead peer.
+	// Signed-in connections have no read deadline because the client goes silent
+	// while loading a level. See docs/games/gera/online-map.md#connection-lifetime.
 	idleTimeout   = noIdle
 	messengerIdle = noIdle
 	theaterIdle   = noIdle
 	// noIdle disables the aries read deadline (a negative duration).
 	noIdle = -1 * time.Second
+	// Connections that have not signed in are closed after these limits. FESL
+	// allows time for account registration on the console keyboard.
+	feslAuthTimeout = 10 * time.Minute
+	auxAuthTimeout  = time.Minute
 )
 
-func Definition() game.Definition {
-	return game.Definition{Key: gameKey, TCPPort: feslPort, AuxTCP: []uint16{messengerPort, theaterPort, relayControlPort},
+// Definition reserves the relay control port only when relay control is configured.
+func Definition(relayControl bool) game.Definition {
+	aux := []uint16{messengerPort, theaterPort}
+	if relayControl {
+		aux = append(aux, relayControlPort)
+	}
+	return game.Definition{Key: gameKey, TCPPort: feslPort, AuxTCP: aux,
 		UDP: []uint16{theaterPort},
 		New: func(opts game.Options) game.Runtime {
-			s := &server{opts: opts, sessions: make(map[*aries.Client]*account), keys: make(map[string]identity)}
+			s := &server{opts: opts, sessions: make(map[*aries.Client]*account), keys: make(map[string]keyEntry),
+				clientKeys: make(map[*aries.Client][]string)}
 			s.store, _ = opts.Store.(storage.IdentityStore)
 			s.stats, _ = opts.Store.(storage.StatsStore)
 			s.social, _ = opts.Store.(socialStore)
@@ -81,7 +84,7 @@ func Definition() game.Definition {
 			}
 			// FESL has no server heartbeat command; fsys Ping is a transaction.
 			return aries.ServeWithOptions(ctx, ssl2.NewListener(ln, s.cert, s.key, s.opts.Log), s,
-				aries.ServeOptions{IdleTimeout: idleTimeout})
+				aries.ServeOptions{IdleTimeout: idleTimeout, AuthTimeout: feslAuthTimeout})
 		}}
 }
 
@@ -102,9 +105,20 @@ type server struct {
 	mu       sync.Mutex
 	sessions map[*aries.Client]*account
 
-	keysMu sync.Mutex
-	keys   map[string]identity
+	keysMu     sync.Mutex
+	keys       map[string]keyEntry
+	clientKeys map[*aries.Client][]string
 }
+
+// keyEntry is an issued session key. A zero expiry means the FESL session is live.
+type keyEntry struct {
+	id      identity
+	expires time.Time
+}
+
+// keyGrace keeps a key usable after its FESL connection drops so Messenger and
+// Theater can reconnect during a brief FESL reconnect. Logout revokes at once.
+const keyGrace = 10 * time.Minute
 
 // identity is the logged-in player a session key resolves to. The messenger
 // authenticates with the key the acct Login or LoginSubAccount issued.
@@ -118,16 +132,49 @@ type identity struct {
 func (s *server) issueKey(id identity) string {
 	key := newLkey()
 	s.keysMu.Lock()
-	s.keys[key] = id
+	s.keys[key] = keyEntry{id: id}
 	s.keysMu.Unlock()
 	return key
+}
+
+// issueSessionKey issues a key owned by c, revoked when c logs out or disconnects.
+func (s *server) issueSessionKey(c *aries.Client, id identity) string {
+	key := s.issueKey(id)
+	s.keysMu.Lock()
+	s.clientKeys[c] = append(s.clientKeys[c], key)
+	s.keysMu.Unlock()
+	return key
+}
+
+// revokeKeys removes c's keys now (grace 0) or after grace, and prunes expired keys.
+func (s *server) revokeKeys(c *aries.Client, grace time.Duration) {
+	now := time.Now()
+	s.keysMu.Lock()
+	defer s.keysMu.Unlock()
+	for _, key := range s.clientKeys[c] {
+		if grace <= 0 {
+			delete(s.keys, key)
+		} else if e, ok := s.keys[key]; ok {
+			e.expires = now.Add(grace)
+			s.keys[key] = e
+		}
+	}
+	delete(s.clientKeys, c)
+	for key, e := range s.keys {
+		if !e.expires.IsZero() && now.After(e.expires) {
+			delete(s.keys, key)
+		}
+	}
 }
 
 func (s *server) lookupKey(key string) (identity, bool) {
 	s.keysMu.Lock()
 	defer s.keysMu.Unlock()
-	id, ok := s.keys[key]
-	return id, ok
+	e, ok := s.keys[key]
+	if !ok || (!e.expires.IsZero() && time.Now().After(e.expires)) {
+		return identity{}, false
+	}
+	return e.id, true
 }
 
 func (s *server) Services() []func(context.Context) error {
@@ -135,13 +182,13 @@ func (s *server) Services() []func(context.Context) error {
 	// Both aux services are plaintext; only the FESL login connection uses SSL.
 	if ln := s.opts.AuxTCP[messengerPort]; ln != nil {
 		services = append(services, func(ctx context.Context) error {
-			return aries.ServeWithOptions(ctx, ln, s.messenger, aries.ServeOptions{IdleTimeout: messengerIdle})
+			return aries.ServeWithOptions(ctx, ln, s.messenger, aries.ServeOptions{IdleTimeout: messengerIdle, AuthTimeout: auxAuthTimeout})
 		})
 	}
 	if ln := s.opts.AuxTCP[theaterPort]; ln != nil {
 		services = append(services, func(ctx context.Context) error {
 			return aries.ServeWithOptions(ctx, ln, s.theater,
-				aries.ServeOptions{Heartbeat: "PING", IdleTimeout: theaterIdle})
+				aries.ServeOptions{Heartbeat: "PING", IdleTimeout: theaterIdle, AuthTimeout: auxAuthTimeout})
 		})
 	}
 	if ln := s.opts.AuxTCP[relayControlPort]; ln != nil {
@@ -167,6 +214,7 @@ func (s *server) Disconnected(c *aries.Client) {
 	s.mu.Lock()
 	delete(s.sessions, c)
 	s.mu.Unlock()
+	s.revokeKeys(c, keyGrace)
 	s.opts.Log.Info("FESL client disconnected", "conn", c.ID(), "reason", c.CloseReason())
 }
 
@@ -224,11 +272,8 @@ func (s *server) hello(c *aries.Client, m fesl.Message) {
 	))
 }
 
-// advertisedIP is the server address a client is told to use for the theater
-// and messenger. A client the server sees from a private address is on the
-// server's own network; pointing it at the public address would need the
-// router to loop traffic back, so it gets the address it already reached the
-// server on. Everyone else gets REI_NATION_PUBLIC_IP.
+// advertisedIP is the theater and messenger address for c: its own LAN address
+// when it is on the server's network, so no router hairpin is needed.
 func (s *server) advertisedIP(c *aries.Client) netip.Addr {
 	if lanAddr(c.Addr()) && !lanAddr(s.opts.PublicIP) {
 		if local := c.LocalAddr(); local.IsValid() && !local.IsUnspecified() {

@@ -29,19 +29,16 @@ func startRelay(t *testing.T) (*Hub, context.Context) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	go hub.Serve(ctx, ln)
 	cert, err := os.ReadFile(filepath.Join(dir, CertFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	node := &Node{Bind: netip.MustParseAddr("127.0.0.1"), PortLow: 45000, PortHigh: 45999, AllowPrivate: true, Log: quiet()}
-	go node.Run(ctx, ControlConfig{Server: ln.Addr().String(), CertPEM: cert, Token: token, Name: "test"})
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := runHubAndNode(t, hub, ln, &Node{Bind: netip.MustParseAddr("127.0.0.1"), PortLow: 45000, PortHigh: 45999,
+		AllowPrivate: true, Log: quiet()}, ControlConfig{Server: ln.Addr().String(), CertPEM: cert, Token: token, Name: "test"})
 	deadline := time.Now().Add(5 * time.Second)
 	for !hub.Available() {
 		if time.Now().After(deadline) {
@@ -50,6 +47,21 @@ func startRelay(t *testing.T) (*Hub, context.Context) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return hub, ctx
+}
+
+// runHubAndNode serves hub and runs node until the test ends, then waits for both to stop.
+func runHubAndNode(t *testing.T, hub *Hub, ln net.Listener, node *Node, cfg ControlConfig) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	hubDone, nodeDone := make(chan struct{}), make(chan struct{})
+	go func() { defer close(hubDone); hub.Serve(ctx, ln) }()
+	go func() { defer close(nodeDone); node.Run(ctx, cfg) }()
+	t.Cleanup(func() {
+		cancel()
+		<-hubDone
+		<-nodeDone
+	})
+	return ctx
 }
 
 func udp(t *testing.T) *net.UDPConn {
@@ -142,8 +154,8 @@ func TestRelayProbe(t *testing.T) {
 		t.Fatalf("probe result %v, want reachable", got)
 	}
 	silent := udp(t)
-	if got := hub.ProbeAll(ctx, endpoint(silent)); got["test"] {
-		t.Fatalf("silent console reported reachable: %v", got)
+	if got := hub.ProbeAll(ctx, endpoint(silent)); func() bool { v, ok := got["test"]; return !ok || v }() {
+		t.Fatalf("silent console: probe result %v, want an answer of unreachable", got)
 	}
 }
 
@@ -156,15 +168,41 @@ func TestRelayRefusesBadToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ln, _ := net.Listen("tcp4", "127.0.0.1:0")
-	go hub.Serve(ctx, ln)
-	cert, _ := os.ReadFile(filepath.Join(dir, CertFile))
-	node := &Node{Bind: netip.MustParseAddr("127.0.0.1"), PortLow: 46000, PortHigh: 46099, Log: quiet()}
-	go node.Run(ctx, ControlConfig{Server: ln.Addr().String(), CertPEM: cert, Token: "wrong", Name: "test"})
-	time.Sleep(500 * time.Millisecond)
+	cert, err := os.ReadFile(filepath.Join(dir, CertFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runHubAndNode(t, hub, ln, &Node{Bind: netip.MustParseAddr("127.0.0.1"), PortLow: 46000, PortHigh: 46099, Log: quiet()},
+		ControlConfig{Server: ln.Addr().String(), CertPEM: cert, Token: "wrong", Name: "test"})
+	// Wait until the hub has recorded the refused hello, then check it stayed out.
+	deadline := time.Now().Add(5 * time.Second)
+	for !hub.sawFailedAuth() {
+		if time.Now().After(deadline) {
+			t.Fatal("hub never saw the node's hello")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	if hub.Available() {
 		t.Fatal("node with a bad token was accepted")
 	}
+}
+
+func TestValidNodeName(t *testing.T) {
+	for name, want := range map[string]bool{"relay1": true, "eu-west.2_a": true, "": false, "..": false,
+		"../x": false, "a b": false, "a\nb": false, "a\u00a0b": false, "a#b": false} {
+		if got := ValidNodeName(name); got != want {
+			t.Errorf("ValidNodeName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// sawFailedAuth reports whether the hub has refused any control hello.
+func (h *Hub) sawFailedAuth() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.failures) > 0
 }

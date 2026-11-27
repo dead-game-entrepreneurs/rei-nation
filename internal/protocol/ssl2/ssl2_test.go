@@ -5,10 +5,14 @@ import (
 	"crypto/rand"
 	"crypto/rc4"
 	"crypto/rsa"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/binary"
 	"errors"
 	"io"
+	"math/big"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -220,10 +224,11 @@ func TestRejectsWrongCipher(t *testing.T) {
 	defer ln.Close()
 	sln := NewListener(ln, certDER, key, nil)
 	errc := make(chan error, 1)
+	acceptErr := make(chan error, 1)
 	go func() {
 		conn, err := sln.Accept()
 		if err != nil {
-			errc <- err
+			acceptErr <- err
 			return
 		}
 		defer conn.Close()
@@ -249,9 +254,11 @@ func TestRejectsWrongCipher(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
+	case err := <-acceptErr:
+		t.Fatalf("accept failed: %v", err)
 	case err := <-errc:
-		if err == nil {
-			t.Fatal("server accepted an unsupported cipher")
+		if err == nil || !strings.Contains(err.Error(), "did not offer RC4-128-MD5") {
+			t.Fatalf("handshake error = %v, want the unsupported-cipher rejection", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("server did not reject the handshake")
@@ -263,17 +270,87 @@ func TestCertificateWorkaroundOIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := bytes.Count(certDER, oidMD5WithRSA); n != 1 {
-		t.Errorf("MD5-with-RSA OID count = %d, want 1 (inner signature)", n)
+	var cert struct {
+		TBS struct {
+			Raw       asn1.RawContent
+			Version   int `asn1:"optional,explicit,default:0,tag:0"`
+			Serial    *big.Int
+			SigAlg    pkix.AlgorithmIdentifier
+			Issuer    asn1.RawValue
+			Validity  struct{ NotBefore, NotAfter asn1.RawValue }
+			Subject   asn1.RawValue
+			PublicKey struct {
+				Algorithm pkix.AlgorithmIdentifier
+				Key       asn1.BitString
+			}
+		}
+		SigAlg pkix.AlgorithmIdentifier
+		Sig    asn1.BitString
 	}
-	if n := bytes.Count(certDER, oidRSAEncryption); n != 2 {
-		t.Errorf("rsaEncryption OID count = %d, want 2 (public key and outer signature)", n)
+	if _, err := asn1.Unmarshal(certDER, &cert); err != nil {
+		t.Fatal(err)
 	}
-	if bytes.Contains(certDER, oidSHA1WithRSA) {
-		t.Error("SHA1-with-RSA OID should have been rewritten")
+	for _, check := range []struct {
+		field string
+		got   asn1.ObjectIdentifier
+		want  []byte
+	}{
+		{"inner signature", cert.TBS.SigAlg.Algorithm, oidMD5WithRSA},
+		{"outer signature", cert.SigAlg.Algorithm, oidRSAEncryption},
+		{"public key", cert.TBS.PublicKey.Algorithm.Algorithm, oidRSAEncryption},
+	} {
+		der, err := asn1.Marshal(check.got)
+		if err != nil || !bytes.Equal(der[2:], check.want) {
+			t.Errorf("%s OID = %v", check.field, check.got)
+		}
 	}
-	// Both validity dates must stay ASN.1 UTCTime (tag 0x17) for the client.
-	if bytes.Contains(certDER, []byte{0x18, 0x0f}) {
-		t.Error("certificate used GeneralizedTime; the client needs UTCTime")
+	// Both validity dates must stay ASN.1 UTCTime (tag 23) for the client.
+	for _, v := range []asn1.RawValue{cert.TBS.Validity.NotBefore, cert.TBS.Validity.NotAfter} {
+		if v.Tag != asn1.TagUTCTime {
+			t.Errorf("validity tag = %d, want UTCTime", v.Tag)
+		}
+	}
+}
+
+// The caller's read deadline must still bound the first application read after
+// the lazy handshake replaces it.
+func TestReadDeadlineSurvivesHandshake(t *testing.T) {
+	certDER, key, err := GenerateCertificate("fesl.ea.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	sln := NewListener(ln, certDER, key, nil)
+	errc := make(chan error, 1)
+	go func() {
+		conn, err := sln.Accept()
+		if err != nil {
+			errc <- err
+			return
+		}
+		defer conn.Close()
+		conn.SetReadDeadline(time.Now().Add(time.Second))
+		_, err = conn.Read(make([]byte, 1))
+		errc <- err
+	}()
+	raw, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	raw.SetDeadline(time.Now().Add(5 * time.Second))
+	handshakeClient(t, raw)
+	select {
+	case err := <-errc:
+		var ne net.Error
+		if !errors.As(err, &ne) || !ne.Timeout() {
+			t.Fatalf("first read error = %v, want a timeout", err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("first read after the handshake had no deadline")
 	}
 }

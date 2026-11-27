@@ -18,9 +18,8 @@ import (
 // (0x14 in its account request callback, FUN_00327908).
 const errNotAuthenticated = 20
 
-// profileKeys are the registration fields the account screen shows and edits,
-// as named in the client's acct string table. They are kept per account in
-// storage; the email and country live on the account itself.
+// profileKeys are the account-screen fields named in the client's acct strings.
+// Email and country live on the account itself.
 var profileKeys = []string{"DOBDay", "DOBMonth", "DOBYear", "eaMailFlag", "thirdPartyMailFlag", "parentalEmail"}
 
 var countryNames = map[string]string{"US": "United States"}
@@ -28,7 +27,6 @@ var countryNames = map[string]string{"US": "United States"}
 // profileStore is what the account screen needs beyond IdentityStore.
 type profileStore interface {
 	storage.ProfileStore
-	UpdateAccount(context.Context, storage.Account, string) (bool, error)
 }
 
 // requestFieldNames lists a request's field names for the log, without values.
@@ -134,24 +132,7 @@ func (s *server) updateAccount(ctx context.Context, c *aries.Client, m fesl.Mess
 		s.acctError(c, m, errServer)
 		return
 	}
-	if newPassword, ok := m.GetFold("newPassword"); ok && newPassword != "" {
-		current, _ := m.GetFold("password")
-		if bcrypt.CompareHashAndPassword([]byte(acc.Hash), []byte(current)) != nil {
-			s.acctError(c, m, errBadPassword)
-			return
-		}
-		hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
-		if err != nil {
-			s.acctError(c, m, errServer)
-			return
-		}
-		if changed, err := ps.UpdateAccount(ctx, acc, string(hash)); err != nil || !changed {
-			s.opts.Log.Error("password change failed", "conn", c.ID(), "error", err)
-			s.acctError(c, m, errServer)
-			return
-		}
-		s.opts.Log.Info("account password changed", "conn", c.ID(), "account_id", acc.ID)
-	}
+	// Validate every field first, then apply all changes in one transaction.
 	address, _ := m.GetFold("email")
 	if address != "" {
 		if _, err := mail.ParseAddress(address); err != nil || len(address) > 128 {
@@ -159,15 +140,29 @@ func (s *server) updateAccount(ctx context.Context, c *aries.Client, m fesl.Mess
 			return
 		}
 	}
-	err = ps.UpdateAccountProfile(ctx, acc.ID, address, profileFields(m))
+	var hash string
+	if newPassword, ok := m.GetFold("newPassword"); ok && newPassword != "" {
+		current, _ := m.GetFold("password")
+		if bcrypt.CompareHashAndPassword([]byte(acc.Hash), []byte(current)) != nil {
+			s.acctError(c, m, errBadPassword)
+			return
+		}
+		h, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+		if err != nil {
+			s.acctError(c, m, errServer)
+			return
+		}
+		hash = string(h)
+	}
+	changed, err := ps.UpdateAccountSettings(ctx, acc, hash, address, profileFields(m))
 	switch {
 	case errors.Is(err, storage.ErrConflict):
 		s.acctError(c, m, errDuplicate)
-	case err != nil:
+	case err != nil || !changed:
 		s.opts.Log.Error("account update failed", "conn", c.ID(), "error", err)
 		s.acctError(c, m, errServer)
 	default:
-		s.opts.Log.Info("account updated", "conn", c.ID(), "account_id", acc.ID)
+		s.opts.Log.Info("account updated", "conn", c.ID(), "account_id", acc.ID, "password_changed", hash != "")
 		c.Send(fesl.Reply(m, m.TXN))
 	}
 }

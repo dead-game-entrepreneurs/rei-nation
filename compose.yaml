@@ -32,6 +32,8 @@ services:
       REI_NATION_PUBLIC_IP: ${REI_NATION_PUBLIC_IP:?set REI_NATION_PUBLIC_IP in .env}
       REI_NATION_HEALTH_PORT: ${REI_NATION_HEALTH_PORT:-8086}
       REI_NATION_RELAY: ${REI_NATION_RELAY:-auto}
+      REI_NATION_GERA_RELAY_DIR: ${REI_NATION_GERA_RELAY_DIR:-}
+      REI_NATION_GERA_RELAY_FORCE: ${REI_NATION_GERA_RELAY_FORCE:-}
       REI_NATION_TSFP_RELAY_IP: ${REI_NATION_TSFP_RELAY_IP:-}
       REI_NATION_TSFP_RELAY_TOKENS: ${REI_NATION_TSFP_RELAY_TOKENS:-}
       REI_NATION_TSFP_RELAY_CONTROL_CERT: ${REI_NATION_TSFP_RELAY_CONTROL_CERT:-}
@@ -47,6 +49,7 @@ services:
     security_opt: ["no-new-privileges:true"]
     volumes:
       - ${REI_NATION_TSFP_RELAY_DIR:-./deploy/relay-control}:/relay-control:ro
+      - ${REI_NATION_GERA_RELAY_HOST_DIR:-./relay}:/gera-relay:ro
     healthcheck:
       test: ["CMD", "/rei-nation", "-healthcheck"]
       interval: 10s

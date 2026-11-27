@@ -17,9 +17,8 @@ type StatUpdate struct {
 	Text *string
 }
 
-// StatValue is one stat for one persona. Rank is the competition rank among
-// personas holding the key, highest value first, and 0 when the persona holds
-// no value for it.
+// StatValue is one persona stat. Rank is its competition rank, highest value
+// first, and 0 when the persona has no value for the key.
 type StatValue struct {
 	Key, Value, Text string
 	Rank             int64

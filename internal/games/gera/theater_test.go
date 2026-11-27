@@ -5,6 +5,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"strconv"
 	"testing"
 	"time"
 
@@ -46,6 +47,7 @@ func dialTheater(t *testing.T, s *server, addr, key string) *theaterClient {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { conn.Close() })
 	conn.SetDeadline(time.Now().Add(5 * time.Second))
 	tc := &theaterClient{t: t, conn: conn}
 	tc.send("CONN", field("tid", "1"))
@@ -59,9 +61,9 @@ func dialTheater(t *testing.T, s *server, addr, key string) *theaterClient {
 	return tc
 }
 
-// echoProbe sends a theater UDP ECHO and returns the observed endpoint the
-// server reports back.
-func echoProbe(t *testing.T, serverAddr netip.AddrPort, fields ...fesl.Field) {
+// echoProbe sends a theater UDP ECHO from a fresh socket and returns that
+// socket's source port, which the server should record.
+func echoProbe(t *testing.T, serverAddr netip.AddrPort, fields ...fesl.Field) int {
 	t.Helper()
 	conn, err := net.DialUDP("udp4", nil, net.UDPAddrFromAddrPort(serverAddr))
 	if err != nil {
@@ -85,6 +87,7 @@ func echoProbe(t *testing.T, serverAddr netip.AddrPort, fields ...fesl.Field) {
 	if err != nil || f.Tag != "ECHO" {
 		t.Fatalf("ECHO reply: %v %q", err, f.Tag)
 	}
+	return conn.LocalAddr().(*net.UDPAddr).Port
 }
 
 func TestTheaterBrowserEntry(t *testing.T) {
@@ -190,6 +193,7 @@ func TestTheaterHostAndJoin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { ln.Close() })
 	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	if err != nil {
 		t.Fatal(err)
@@ -230,8 +234,9 @@ func TestTheaterHostAndJoin(t *testing.T) {
 		t.Fatalf("CGAM missing GID/SECRET: %q %q", gid, secret)
 	}
 
-	// Host advertises its public UDP endpoint via ECHO (host-secret binding).
-	echoProbe(t, udpAddr, field("tid", "1"), field("type", "1"), field("ugid", gid), field("secret", secret))
+	// Host advertises its public UDP endpoint via ECHO (host-secret binding);
+	// the observed port differs from the advertised 3000.
+	observedPort := strconv.Itoa(echoProbe(t, udpAddr, field("tid", "1"), field("type", "1"), field("ugid", gid), field("secret", secret)))
 
 	// Joiner lists games and sees the hosted one with the observed endpoint.
 	joiner := dialTheater(t, s, ln.Addr().String(), joinKey)
@@ -250,6 +255,9 @@ func TestTheaterHostAndJoin(t *testing.T) {
 	}
 	if v, _ := gdat.Get("I"); v != "127.0.0.1" {
 		t.Fatalf("GDAT host IP = %q, want the observed 127.0.0.1", v)
+	}
+	if v, _ := gdat.Get("P"); v != observedPort {
+		t.Fatalf("GDAT host port = %q, want the observed %s", v, observedPort)
 	}
 
 	// Joiner requests to join; the host receives an EGRQ.
@@ -279,14 +287,16 @@ func TestTheaterHostAndJoin(t *testing.T) {
 	if v, _ := egeg.Get("I"); v != "127.0.0.1" {
 		t.Fatalf("EGEG host I = %q", v)
 	}
+	if v, _ := egeg.Get("P"); v != observedPort {
+		t.Fatalf("EGEG host P = %q, want the observed %s", v, observedPort)
+	}
 	if v, _ := egeg.Get("INT-IP"); v != "0.0.0.0" {
 		t.Fatalf("EGEG INT-IP = %q, want suppressed 0.0.0.0", v)
 	}
 }
 
-// Consoles choose their lobby from their own region setting, so a host and a
-// joiner on one network can pick different lobbies. Games must still be listed
-// and joinable from every lobby.
+// A host and joiner on one network can pick different lobbies, so every game
+// must be listed and joinable from every lobby.
 func TestTheaterGamesVisibleAcrossLobbies(t *testing.T) {
 	s := newTestServer(t)
 	hostKey := s.issueKey(identity{accountID: 1, personaID: 10, personaName: "Host"})
@@ -436,9 +446,8 @@ func TestTheaterKicksHostWhenApprovedGuestLeaves(t *testing.T) {
 	}
 }
 
-// Players behind one router share a public IP. An anonymous ECHO goes to the
-// connection already seen on that port, else the only one not yet seen, and
-// is otherwise dropped rather than guessed.
+// On a shared public IP an anonymous ECHO goes only to the connection already
+// seen on that port; a new port may be a seen console whose NAT moved.
 func TestTheaterEchoAttributionSharedIP(t *testing.T) {
 	s := newTestServer(t)
 	h := s.theater
@@ -456,8 +465,8 @@ func TestTheaterEchoAttributionSharedIP(t *testing.T) {
 	if got := h.attributeEcho(anon, "203.0.113.5", 40001); got != c1 {
 		t.Fatal("known port should refresh its own session")
 	}
-	if got := h.attributeEcho(anon, "203.0.113.5", 40002); got != c2 {
-		t.Fatal("new port should go to the only unseen session")
+	if got := h.attributeEcho(anon, "203.0.113.5", 40002); got != nil {
+		t.Fatal("new port on a shared IP should not be guessed")
 	}
 	h.observed[c2] = addr{"203.0.113.5", 40002}
 	if got := h.attributeEcho(anon, "203.0.113.5", 40003); got != nil {
@@ -468,9 +477,8 @@ func TestTheaterEchoAttributionSharedIP(t *testing.T) {
 	}
 }
 
-// A console the server sees from a private address is on the server's own
-// network and shares its public address on the Internet. Remote viewers must
-// get that public address; viewers on the same network keep the private one.
+// Remote viewers get the public address for a console on the server's LAN;
+// viewers on that LAN keep its private address.
 func TestTheaterReachableEndpoint(t *testing.T) {
 	s := newTestServer(t) // REI_NATION_PUBLIC_IP 192.0.2.10
 	h := s.theater
@@ -511,5 +519,61 @@ func TestTheaterReachableEndpoint(t *testing.T) {
 	h.mu.Unlock()
 	if primary != (addr{"192.0.2.10", 18040}) || alternate != (addr{"0.0.0.0", 0}) {
 		t.Errorf("remote joiner got primary %v alternate %v", primary, alternate)
+	}
+}
+
+// A host approval that arrives after the guest cancelled gets a KICK, so the
+// host releases the seat it reserved.
+func TestTheaterKicksLateApprovalAfterCancel(t *testing.T) {
+	s := newTestServer(t)
+	hostKey := s.issueKey(identity{accountID: 1, personaID: 10, personaName: "Host"})
+	guestKey := s.issueKey(identity{accountID: 2, personaID: 20, personaName: "Guest"})
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- aries.ServeWithOptions(ctx, ln, s.theater, aries.ServeOptions{IdleTimeout: time.Minute})
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+
+	host := dialTheater(t, s, ln.Addr().String(), hostKey)
+	t.Cleanup(func() { host.conn.Close() })
+	host.send("CGAM", field("tid", "3"), field("lid", "1"), field("name", "Late"), field("port", "18040"))
+	gid, _ := host.read().Get("GID")
+	guest := dialTheater(t, s, ln.Addr().String(), guestKey)
+	t.Cleanup(func() { guest.conn.Close() })
+	guest.send("EGAM", field("tid", "20"), field("lid", "1"), field("gid", gid), field("port", "3000"))
+	if m := guest.read(); m.Service != "EGAM" {
+		t.Fatalf("guest EGAM reply = %s", m.Service)
+	}
+	pid, _ := host.read().Get("PID")
+	guest.send("ECNL", field("tid", "22"), field("gid", gid), field("lid", "1"))
+	guest.read()
+
+	host.send("EGRS", field("tid", "21"), field("pid", pid), field("allowed", "1"))
+	if m := host.read(); m.Service != "EGRS" {
+		t.Fatalf("host EGRS reply = %s", m.Service)
+	}
+	if k := host.read(); k.Service != "KICK" {
+		t.Fatalf("host expected KICK for the cancelled join, got %s", k.Service)
+	} else if v, _ := k.Get("PID"); v != pid {
+		t.Fatalf("KICK PID = %q, want %q", v, pid)
+	}
+}
+
+// Operator force rules never fall back to a direct join, even on a shared IP.
+func TestForcedRelayWithoutRelayRefuses(t *testing.T) {
+	s := newTestServer(t)
+	s.relayPolicy = newRelayPolicy([]string{"*"})
+	g := &hostedGame{owner: &aries.Client{}, hostIP: "198.51.100.1", port: 3000}
+	s.theater.mu.Lock()
+	defer s.theater.mu.Unlock()
+	for _, ip := range []string{"203.0.113.9", "198.51.100.1"} {
+		if mode, reason := s.theater.relayDecision(g, identity{personaID: 2}, ip); mode != "refuse" {
+			t.Fatalf("joiner %s: mode %q (%s), want refuse", ip, mode, reason)
+		}
 	}
 }

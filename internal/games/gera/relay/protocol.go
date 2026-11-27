@@ -1,18 +1,5 @@
-// Package relay is the UDP relay fallback for GoldenEye players whose NATs
-// block a direct connection. It ports the TimeSplitters: Future Perfect relay
-// (src/tsfp_online/relay.py and relay_hub.py in that project), which serves the
-// same EA FESL 1.2 game-browser library.
-//
-// A relay node runs on its own machine and public IP: the client treats every
-// datagram from the theater's IP as server traffic, so a relay sharing that IP
-// would be mistaken for the server. The node dials the Rei Nation server over
-// TLS, pins the server's control certificate and signs in with a token. The
-// server (Hub) then asks it to open one room per match. A room holds one relay
-// port per player: whatever player Y sends to X's port reaches X from Y's
-// port, so every player sees each other player at one fixed relay address.
-// That satisfies the client's check that peer traffic comes from the address
-// it was given, and it keeps working when the host passes a relayed player's
-// address on to other guests.
+// Package relay is the UDP relay for GoldenEye players whose NATs block direct play,
+// ported from the TimeSplitters relay. See docs/games/gera/internet-play.md#relay.
 package relay
 
 import (
@@ -22,9 +9,8 @@ import (
 	"strings"
 )
 
-// message is one JSON line on the control link. Ops from the server: add,
-// remove, probe, close, ping. From the node: hello, added, probed, closed,
-// failed, pong.
+// message is one JSON control line: add, remove, probe, close and ping from the
+// server; hello, added, probed, closed, failed and pong from the node.
 type message struct {
 	Op       string            `json:"op"`
 	ID       string            `json:"id,omitempty"`
@@ -49,11 +35,8 @@ type message struct {
 
 const maxLine = 4096
 
-// probeRequest is the code word of a PROB request. A console answers any PROB
-// request with code 0 and the same TID (FUN_004b7968 -> FUN_004b7578 in the
-// GoldenEye binary, the same handler TimeSplitters has at 0x592978). Sent from
-// a fresh port, an answer shows the console's router lets in packets from an
-// address it never sent to.
+// probeRequest is a PROB request code; consoles answer any PROB with code 0
+// (FUN_004b7968 in GoldenEye). See internet-play.md#relay.
 const probeRequest = 0xC0000000
 
 // probePacket is a PROB request as TimeSplitters' relay sends it: a 0xFFFF

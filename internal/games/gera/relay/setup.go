@@ -22,10 +22,21 @@ import (
 	"time"
 )
 
-// The relay directory holds the server's control certificate and key and
-// tokens.txt, one line per node: "name sha256:<token hash> <public ip>". The
-// server keeps only the hash, and a node is accepted only from its registered
-// IP, which is also the address players are sent to.
+// ValidNodeName limits names to characters safe in tokens.txt and file names.
+func ValidNodeName(name string) bool {
+	if name == "" || len(name) > 32 || name == "." || name == ".." {
+		return false
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// tokens.txt has one line per node: "name sha256:<token hash> <public ip>".
+// See docs/games/gera/internet-play.md#relay-directory.
 const (
 	CertFile   = "control-cert.pem"
 	KeyFile    = "control-key.pem"
@@ -100,12 +111,11 @@ func pinnedClientConfig(certPEM []byte) (*tls.Config, error) {
 	}, nil
 }
 
-// Setup creates the relay directory's control certificate if needed and
-// registers a node, returning the node's token. The token is shown once; only
-// its hash is stored.
+// Setup creates the control certificate if needed and registers a node. It
+// returns the node's token once; only its hash is stored.
 func Setup(dir, name string, publicIP netip.Addr) (string, error) {
-	if name == "" || strings.ContainsAny(name, " \t#") {
-		return "", errors.New("node name must be one word")
+	if !ValidNodeName(name) {
+		return "", errors.New("node name must be 1-32 ASCII letters, digits, '.', '_' or '-'")
 	}
 	if !publicIP.Is4() {
 		return "", errors.New("node public IP must be IPv4")

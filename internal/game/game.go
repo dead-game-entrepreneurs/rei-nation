@@ -36,9 +36,8 @@ type Options struct {
 	AuxTCP   map[uint16]net.Listener
 	UDP      map[uint16]*net.UDPConn
 	Relay    string
-	// RelayDir and RelayForce configure the GoldenEye relay hub: the directory
-	// with its control certificate and node tokens, and personas (names or
-	// IDs, "*" for all) whose joins always go through a relay.
+	// RelayDir holds the GoldenEye relay certificate and tokens; RelayForce lists
+	// personas (names, IDs or "*") that always join through a relay.
 	RelayDir         string
 	RelayForce       []string
 	SendRecoveryMail func(ctx context.Context, recipient, subject, body string) error

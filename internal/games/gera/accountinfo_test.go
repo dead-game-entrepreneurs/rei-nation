@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/netip"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/game"
@@ -31,39 +30,48 @@ func (s *memProfiles) AccountProfile(_ context.Context, id int64) (map[string]st
 	return out, nil
 }
 
-func (s *memProfiles) UpdateAccountProfile(_ context.Context, id int64, mail string, details map[string]string) error {
+func (s *memProfiles) UpdateAccountProfile(ctx context.Context, id int64, mail string, details map[string]string) error {
+	_, err := s.UpdateAccountSettings(ctx, storage.Account{ID: id}, "", mail, details)
+	return err
+}
+
+func (s *memProfiles) UpdateAccountSettings(_ context.Context, current storage.Account, hash, mail string,
+	details map[string]string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key, a := range s.accounts {
-		if a.ID == id && mail != "" {
-			a.Mail = mail
-			s.accounts[key] = a
+		if a.ID != current.ID {
+			continue
 		}
+		if hash != "" {
+			if a.Hash != current.Hash {
+				return false, nil
+			}
+			a.Hash = hash
+		}
+		if mail == conflictMail {
+			return false, storage.ErrConflict
+		}
+		if mail != "" {
+			a.Mail = mail
+		}
+		s.accounts[key] = a
 	}
-	if s.profiles[id] == nil {
-		s.profiles[id] = map[string]string{}
+	if s.profiles[current.ID] == nil {
+		s.profiles[current.ID] = map[string]string{}
 	}
 	for k, v := range details {
-		s.profiles[id][k] = v
+		s.profiles[current.ID][k] = v
 	}
-	return nil
+	return true, nil
 }
 
-func (s *memProfiles) UpdateAccount(_ context.Context, current storage.Account, hash string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := strings.ToLower(current.Name)
-	if a, ok := s.accounts[key]; ok && a.Hash == current.Hash {
-		a.Hash = hash
-		s.accounts[key] = a
-		return true, nil
-	}
-	return false, nil
-}
+// conflictMail is an address the test store reports as used by another account.
+const conflictMail = "taken@example.com"
 
 func TestAccountOptions(t *testing.T) {
 	store := &memProfiles{memStore: newMemStore(), profiles: map[int64]map[string]string{}}
-	s := Definition().New(game.Options{PublicIP: netip.MustParseAddr("192.0.2.10"),
+	s := Definition(false).New(game.Options{PublicIP: netip.MustParseAddr("192.0.2.10"),
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Store: store}).(*server)
 	_, conn, cleanup := dialHandler(t, s)
 	defer cleanup()
@@ -113,5 +121,18 @@ func TestAccountOptions(t *testing.T) {
 	}
 	if code := errorCode(call("Login", field("name", "bond"), field("password", "pw-2"))); code != "" {
 		t.Fatalf("login with the new password errorCode %s", code)
+	}
+
+	// A rejected update changes nothing, including a valid password change.
+	if code := errorCode(call("UpdateAccount", field("password", "pw-2"), field("newPassword", "pw-3"),
+		field("email", "not an address"))); code != strconv.Itoa(errMissingField) {
+		t.Fatalf("invalid email errorCode = %q", code)
+	}
+	if code := errorCode(call("UpdateAccount", field("password", "pw-2"), field("newPassword", "pw-3"),
+		field("email", conflictMail))); code != strconv.Itoa(errDuplicate) {
+		t.Fatalf("conflicting email errorCode = %q", code)
+	}
+	if code := errorCode(call("Login", field("name", "bond"), field("password", "pw-2"))); code != "" {
+		t.Fatalf("rejected update changed the password: login errorCode %s", code)
 	}
 }

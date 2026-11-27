@@ -31,6 +31,8 @@ const (
 	// mailKind marks GoldenEye messages in the shared mailbox. Delivered rows
 	// are deleted, unlike NASCAR 04 history.
 	mailKind = "gera-message"
+	// mailRetry is how long an unacknowledged message waits before it is resent.
+	mailRetry = 30 * time.Second
 	// The recipient copies BODY into a 256-byte buffer and SUBJ into 32 in the
 	// TimeSplitters build of this library.
 	maxBody    = 255
@@ -55,23 +57,17 @@ type socialStore interface {
 	AckMail(context.Context, string, string, int64) error
 }
 
-// messenger is the EA Messenger service on the aux port. The client opens it
-// right after persona login and will not consider itself online until the
-// AUTH handshake succeeds. It shares the server's session-key store so the key
-// issued at FESL login identifies the player here.
-//
-// Friends are request-and-accept, kept in the shared buddies table under the
-// gera title. The command set and field names match the GoldenEye binary's
-// messenger tag table; the roster flag letters and notification order follow
-// the TimeSplitters server, which uses the same library.
+// messenger is EA Messenger on TCP 18042, authenticated by the FESL session key.
+// See docs/games/gera/online-map.md#messenger for the command set and roster rules.
 type messenger struct {
 	srv *server
 
 	mu       sync.Mutex
 	sessions map[*aries.Client]*presence
 
-	// deliverMu serializes mailbox delivery so a message is not sent twice.
+	// deliverMu serializes delivery; inFlight holds mail sent but not yet written.
 	deliverMu sync.Mutex
+	inFlight  map[int64]time.Time
 }
 
 type presence struct {
@@ -126,10 +122,11 @@ func (h *messenger) Disconnected(c *aries.Client) {
 	delete(h.sessions, c)
 	h.mu.Unlock()
 	h.srv.opts.Log.Info("messenger client disconnected", "conn", c.ID(), "reason", c.CloseReason())
-	if p != nil && p.authed && h.srv.social != nil && len(h.online(p.id.personaName)) == 0 {
+	// Republish the newest remaining ready presence, or offline when none is left.
+	if p != nil && p.authed && p.ready && h.srv.social != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), storeTimeout)
 		defer cancel()
-		h.notifyPresence(ctx, p.id.personaName, nil)
+		h.notifyPresence(ctx, p.id.personaName, h.latest(p.id.personaName))
 	}
 }
 
@@ -237,9 +234,15 @@ func (h *messenger) auth(c *aries.Client, p *presence, m fesl.Message, ident str
 		return
 	}
 	h.mu.Lock()
+	if p.authed && p.id.personaID != id.personaID {
+		// A different persona starts a fresh session: no pushes until its own PSET.
+		p.ready = false
+		p.fields = nil
+	}
 	p.id = id
 	p.authed = true
 	h.mu.Unlock()
+	c.ClearInitialReadDeadline()
 	h.srv.opts.Log.Info("messenger auth", "conn", c.ID(), "persona", id.personaName, "persona_id", id.personaID)
 	c.Send(fesl.Packet("AUTH", msgOK,
 		fesl.Field{Key: "ID", Value: ident},
@@ -502,9 +505,8 @@ func (h *messenger) changeRoster(ctx context.Context, c *aries.Client, m fesl.Me
 			h.storeFailed(c, ack, err)
 			return
 		}
-		// An A with S on an entry that holds T replaces T on the client
-		// (RNOT handler near 0x4ccf88), so an accept needs no D first; a D
-		// would delete the entry the client keeps from its own request.
+		// An accept needs no D first: the client replaces T with S, and a D would delete
+		// the entry it keeps from its own request (online-map.md#messenger).
 		if state == before {
 			break
 		}
@@ -610,8 +612,8 @@ func (h *messenger) send(ctx context.Context, c *aries.Client, m fesl.Message, p
 	h.deliver(ctx, other.Name)
 }
 
-// deliver pushes queued messages to a persona's ready connections and removes
-// each one once it is queued for sending.
+// deliver pushes queued messages to a persona's ready connections. The first
+// completed write acknowledges a message; a dropped frame leaves it queued.
 func (h *messenger) deliver(ctx context.Context, name string) {
 	h.deliverMu.Lock()
 	defer h.deliverMu.Unlock()
@@ -629,10 +631,18 @@ func (h *messenger) deliver(ctx context.Context, name string) {
 		h.srv.opts.Log.Error("messenger mailbox read failed", "error", err)
 		return
 	}
+	if h.inFlight == nil {
+		h.inFlight = make(map[int64]time.Time)
+	}
+	now := time.Now()
 	for _, mail := range mails {
 		if mail.Kind != mailKind {
 			continue
 		}
+		if sent, ok := h.inFlight[mail.ID]; ok && now.Sub(sent) < mailRetry {
+			continue
+		}
+		h.inFlight[mail.ID] = now
 		var b mailBody
 		if json.Unmarshal([]byte(mail.Body), &b) != nil {
 			b = mailBody{Type: "C"}
@@ -647,15 +657,28 @@ func (h *messenger) deliver(ctx context.Context, name string) {
 			fesl.Field{Key: "BODY", Value: b.Body},
 			fesl.Field{Key: "NOREPLY", Value: "0"},
 		)
+		var once sync.Once
+		id := mail.ID
 		for _, o := range ready {
-			o.c.Send(packet)
+			o.c.SendAfter(packet, func() { once.Do(func() { h.ack(name, id, len(ready)) }) })
 		}
-		if err := h.srv.social.AckMail(ctx, gameKey, name, mail.ID); err != nil {
-			h.srv.opts.Log.Error("messenger mailbox ack failed", "error", err)
-			return
-		}
-		h.srv.opts.Log.Info("messenger message delivered", "message_id", mail.ID, "connections", len(ready))
 	}
+}
+
+// ack removes a written message from the queue. It runs on a writer goroutine
+// after deliver has returned, so it uses its own context.
+func (h *messenger) ack(name string, id int64, connections int) {
+	ctx, cancel := context.WithTimeout(context.Background(), storeTimeout)
+	defer cancel()
+	err := h.srv.social.AckMail(ctx, gameKey, name, id)
+	h.deliverMu.Lock()
+	delete(h.inFlight, id)
+	h.deliverMu.Unlock()
+	if err != nil {
+		h.srv.opts.Log.Error("messenger mailbox ack failed", "error", err)
+		return
+	}
+	h.srv.opts.Log.Info("messenger message delivered", "message_id", id, "connections", connections)
 }
 
 // validID accepts the decimal transaction identifier the client echoes.

@@ -1,8 +1,5 @@
-// Package ssl2 implements the SSL 2.0 RC4-128-MD5 transport that the PS2 FESL
-// client negotiates before sending any FESL traffic. It implements only the one
-// cipher and message flow that client uses and is not a general TLS server. SSL
-// 2.0 and RC4 are obsolete and broken; this exists solely to let a retail client
-// of a discontinued game reach the replacement service on an isolated network.
+// Package ssl2 implements the obsolete SSL 2.0 RC4-128-MD5 transport that PS2 FESL
+// clients require. See docs/games/gera/online-map.md#ssl-transport.
 package ssl2
 
 import (
@@ -31,11 +28,8 @@ const (
 	handshakeTimeout = 20 * time.Second
 )
 
-// NewListener wraps a listener so each accepted connection negotiates SSL 2.0
-// before any byte of application data is read or written. The certificate DER
-// and key come from GenerateCertificate. log may be nil; when set, each
-// connection and handshake step is logged at debug level, which is useful while
-// bringing a new client online.
+// NewListener wraps a listener so each connection negotiates SSL 2.0 before any
+// application data. log may be nil; when set, handshake steps are logged.
 func NewListener(inner net.Listener, certDER []byte, key *rsa.PrivateKey, log *slog.Logger) net.Listener {
 	return &listener{Listener: inner, cert: certDER, key: key, log: log}
 }
@@ -67,10 +61,8 @@ func (l *listener) Accept() (net.Conn, error) {
 	return &Conn{Conn: c, cert: l.cert, key: l.key, log: l.log}, nil
 }
 
-// Conn is a net.Conn whose Read and Write carry SSL 2.0 records. The handshake
-// runs lazily on the first Read or Write so Accept does not block on a slow
-// peer. Read and Write may be called concurrently once the handshake is done,
-// matching how the Aries server runs a reader and a writer goroutine per client.
+// Conn carries SSL 2.0 records. The handshake runs on the first Read or Write so
+// Accept never blocks; afterwards one reader and one writer may run concurrently.
 type Conn struct {
 	net.Conn
 	cert []byte
@@ -79,6 +71,9 @@ type Conn struct {
 
 	hsOnce sync.Once
 	hsErr  error
+
+	deadlineMu   sync.Mutex
+	readDeadline time.Time // the caller's, restored after the handshake
 
 	readMu   sync.Mutex
 	writeMu  sync.Mutex
@@ -89,6 +84,21 @@ type Conn struct {
 	enc      *rc4.Cipher
 	dec      *rc4.Cipher
 	plain    []byte // decrypted bytes not yet returned by Read
+}
+
+// SetReadDeadline records the caller's deadline so the handshake can restore it.
+func (c *Conn) SetReadDeadline(t time.Time) error {
+	c.deadlineMu.Lock()
+	c.readDeadline = t
+	c.deadlineMu.Unlock()
+	return c.Conn.SetReadDeadline(t)
+}
+
+func (c *Conn) SetDeadline(t time.Time) error {
+	c.deadlineMu.Lock()
+	c.readDeadline = t
+	c.deadlineMu.Unlock()
+	return c.Conn.SetDeadline(t)
 }
 
 func (c *Conn) handshake() error {
@@ -120,16 +130,11 @@ func (c *Conn) Write(p []byte) (int, error) {
 	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	if err := c.writeRecords(p); err != nil {
-		return 0, err
-	}
-	return len(p), nil
+	return c.writeRecords(p)
 }
 
-// readRecord reads one SSL 2.0 record. Before encryption is enabled it returns
-// the record body unchanged; after, it decrypts, checks the MAC and strips
-// padding. Callers hold readMu, or run inside the handshake where no other
-// record I/O is in flight.
+// readRecord reads one record, decrypting and checking its MAC once encryption is
+// on. Callers hold readMu or run inside the handshake.
 func (c *Conn) readRecord() ([]byte, error) {
 	var hdr [2]byte
 	if _, err := io.ReadFull(c.Conn, hdr[:]); err != nil {
@@ -178,10 +183,9 @@ func (c *Conn) readRecord() ([]byte, error) {
 	return content, nil
 }
 
-// writeRecords splits payload into records, each with a two-byte header and the
-// high bit set. After encryption is enabled each record carries a leading MAC.
-// RC4 is a stream cipher, so records never need padding.
-func (c *Conn) writeRecords(payload []byte) error {
+// writeRecords splits payload into unpadded records and returns the payload bytes
+// written; RC4 is a stream cipher, so no padding is needed.
+func (c *Conn) writeRecords(payload []byte) (int, error) {
 	max := maxRecord
 	if c.enc != nil {
 		max -= macSize
@@ -204,10 +208,10 @@ func (c *Conn) writeRecords(payload []byte) error {
 		binary.BigEndian.PutUint16(record[:2], 0x8000|uint16(len(body)))
 		copy(record[2:], body)
 		if _, err := c.Conn.Write(record); err != nil {
-			return err
+			return start, err
 		}
 	}
-	return nil
+	return len(payload), nil
 }
 
 func (c *Conn) doHandshake() (err error) {
@@ -242,7 +246,7 @@ func (c *Conn) doHandshake() (err error) {
 	hello = append(hello, c.cert...)
 	hello = append(hello, rc4MD5...)
 	hello = append(hello, connID...)
-	if err := c.writeRecords(hello); err != nil {
+	if _, err := c.writeRecords(hello); err != nil {
 		return err
 	}
 	c.trace("SSL ServerHello sent", "cert_bytes", len(c.cert))
@@ -258,7 +262,7 @@ func (c *Conn) doHandshake() (err error) {
 	c.enableEncryption(master, challenge, connID)
 	c.trace("SSL ClientMasterKey accepted")
 
-	if err := c.writeRecords(append([]byte{5}, challenge...)); err != nil { // SERVER-VERIFY
+	if _, err := c.writeRecords(append([]byte{5}, challenge...)); err != nil { // SERVER-VERIFY
 		return err
 	}
 	rec, err = c.readRecord()
@@ -272,11 +276,14 @@ func (c *Conn) doHandshake() (err error) {
 	if _, err := rand.Read(sessionID); err != nil {
 		return err
 	}
-	if err := c.writeRecords(append([]byte{6}, sessionID...)); err != nil { // SERVER-FINISHED
+	if _, err := c.writeRecords(append([]byte{6}, sessionID...)); err != nil { // SERVER-FINISHED
 		return err
 	}
 
-	c.Conn.SetDeadline(time.Time{})
+	c.Conn.SetWriteDeadline(time.Time{})
+	c.deadlineMu.Lock()
+	c.Conn.SetReadDeadline(c.readDeadline)
+	c.deadlineMu.Unlock()
 	c.trace("SSL handshake complete")
 	return nil
 }
@@ -342,12 +349,14 @@ func parseMasterKey(d []byte, key *rsa.PrivateKey) ([]byte, error) {
 	if clearLen != 0 || argLen != 0 || encLen == 0 || len(d) != 10+encLen {
 		return nil, errors.New("ssl2: invalid ClientMasterKey lengths")
 	}
-	master, err := rsa.DecryptPKCS1v15(rand.Reader, key, d[10:])
-	if err != nil {
-		return nil, errors.New("ssl2: could not decrypt the master key")
+	// A bad padding keeps the random key, so the failure surfaces only at
+	// CLIENT-FINISHED and does not reveal padding validity.
+	master := make([]byte, macSize)
+	if _, err := rand.Read(master); err != nil {
+		return nil, err
 	}
-	if len(master) != macSize {
-		return nil, errors.New("ssl2: master key is not 16 bytes")
+	if err := rsa.DecryptPKCS1v15SessionKey(nil, key, d[10:], master); err != nil {
+		return nil, errors.New("ssl2: invalid master key ciphertext length")
 	}
 	return master, nil
 }

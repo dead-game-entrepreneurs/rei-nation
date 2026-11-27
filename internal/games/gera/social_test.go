@@ -19,9 +19,8 @@ import (
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/storage"
 )
 
-// memSocial adds in-memory friends, mail and stats to memStore. It mirrors the
-// PostgreSQL rules the adapter depends on; the SQL itself is covered by the
-// storage package's database test.
+// memSocial is an in-memory stand-in for the PostgreSQL social rules the adapter
+// relies on; the SQL is covered by the storage database test.
 type memSocial struct {
 	*memStore
 	smu     sync.Mutex
@@ -270,7 +269,7 @@ func newSocialServer(t *testing.T) (*server, *memSocial) {
 	store := newMemSocial()
 	opts := game.Options{PublicIP: netip.MustParseAddr("192.0.2.10"),
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Store: store}
-	return Definition().New(opts).(*server), store
+	return Definition(false).New(opts).(*server), store
 }
 
 // msgClient is a messenger connection that collects every frame it receives.
@@ -438,9 +437,7 @@ func TestMessengerFriends(t *testing.T) {
 	expectField(t, recv, "USER", "Bond")
 	expectField(t, recv, "BODY", "Meet at the dam")
 	expectField(t, recv, "SUBJ", "Hi")
-	if mail, _ := store.Mailbox(ctx, gameKey, "Goldfinger"); len(mail) != 0 {
-		t.Fatalf("delivered mail still queued: %d", len(mail))
-	}
+	waitMailboxEmpty(t, store, "Goldfinger")
 
 	// Removing the friend drops it from both rosters.
 	b.send("RDEL", fesl.Field{Key: "USER", Value: "Bond"}, fesl.Field{Key: "LIST", Value: "B"})
@@ -582,9 +579,8 @@ func TestRankStats(t *testing.T) {
 	top := call("GetTopN", fesl.Field{Key: "key", Value: "kills"}, fesl.Field{Key: "minRank", Value: "1"}, fesl.Field{Key: "maxRank", Value: "1"})
 	expectField(t, top, "stats.[]", "1")
 	expectField(t, top, "stats.0.value", "9.0000")
-	// Once Xenia has joined Bond's game, Bond's report for her counts. Wins
-	// and games also fill in the rank and win percentage the screens read,
-	// and update type 5 replaces a value.
+	// After Xenia joins Bond's game, Bond may report her stats; wins and games fill
+	// the derived stats, and update type 5 replaces a value.
 	s.theater.mu.Lock()
 	s.theater.guests = map[int64]map[int64]time.Time{bond.ID: {xenia.ID: time.Now()}}
 	s.theater.mu.Unlock()
@@ -603,4 +599,94 @@ func TestRankStats(t *testing.T) {
 	expectField(t, hers, "stats.0.rank", "1")
 	expectField(t, hers, "stats.1.value", "0.5000")
 	expectField(t, hers, "stats.2.value", "4.0000")
+}
+
+// waitMailboxEmpty polls because the server acknowledges mail after the write completes.
+func waitMailboxEmpty(t *testing.T, store *memSocial, name string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mail, err := store.Mailbox(t.Context(), gameKey, name)
+		if err == nil && len(mail) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("delivered mail still queued: %d (err %v)", len(mail), err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// startMessengerPair serves the messenger with Bond and Oddjob as accepted friends.
+func startMessengerPair(t *testing.T) (s *server, addr string, bond, odd storage.Persona) {
+	t.Helper()
+	s, store := newSocialServer(t)
+	ctx := t.Context()
+	for _, name := range []string{"Bond", "Oddjob"} {
+		if err := store.CreatePersona(ctx, 1, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.RequestFriend(ctx, gameKey, "Bond", "Oddjob")
+	store.RequestFriend(ctx, gameKey, "Oddjob", "Bond")
+	bond, _, _ = store.PersonaByName(ctx, "Bond")
+	odd, _, _ = store.PersonaByName(ctx, "Oddjob")
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- aries.ServeWithOptions(sctx, ln, s.messenger, aries.ServeOptions{IdleTimeout: noIdle}) }()
+	t.Cleanup(func() { cancel(); <-done })
+	return s, ln.Addr().String(), bond, odd
+}
+
+func TestMessengerPresenceAfterReadyConnectionCloses(t *testing.T) {
+	s, addr, bond, odd := startMessengerPair(t)
+	a := dialMessenger(t, addr, s.issueKey(identity{accountID: 1, personaID: bond.ID, personaName: bond.Name}))
+	a.call("PSET", fesl.Field{Key: "SHOW", Value: "CHAT"})
+
+	oddKey := s.issueKey(identity{accountID: 1, personaID: odd.ID, personaName: odd.Name})
+	older := dialMessenger(t, addr, oddKey)
+	older.quiet()
+	older.send("PSET", fesl.Field{Key: "SHOW", Value: "AWAY"})
+	older.next("PSET")
+	expectField(t, a.next("PGET"), "SHOW", "AWAY")
+	newer := dialMessenger(t, addr, oddKey)
+	newer.quiet()
+	newer.send("PSET", fesl.Field{Key: "SHOW", Value: "CHAT"})
+	newer.next("PSET")
+	expectField(t, a.next("PGET"), "SHOW", "CHAT")
+	unready := dialMessenger(t, addr, oddKey)
+
+	// The older ready connection's presence returns when the newest closes.
+	newer.conn.Close()
+	expectField(t, a.next("PGET"), "SHOW", "AWAY")
+	// An authenticated but unready connection does not keep the persona online.
+	older.conn.Close()
+	expectField(t, a.next("PGET"), "SHOW", "DISC")
+	unready.quiet()
+}
+
+func TestMessengerPersonaSwitchWaitsForPSET(t *testing.T) {
+	s, addr, bond, odd := startMessengerPair(t)
+	a := dialMessenger(t, addr, s.issueKey(identity{accountID: 1, personaID: bond.ID, personaName: bond.Name}))
+	a.call("PSET", fesl.Field{Key: "SHOW", Value: "CHAT"})
+	a.quiet()
+
+	// The same connection signs in as Oddjob; it gets no pushes before its own PSET.
+	oddKey := s.issueKey(identity{accountID: 1, personaID: odd.ID, personaName: odd.Name})
+	if m := a.call("AUTH", fesl.Field{Key: "lkey", Value: oddKey}); m.Code != msgOK {
+		t.Fatalf("AUTH code %#x", m.Code)
+	}
+	s.messenger.mu.Lock()
+	var ready bool
+	for _, p := range s.messenger.sessions {
+		ready = ready || p.ready
+	}
+	s.messenger.mu.Unlock()
+	if ready {
+		t.Fatal("switched persona kept the previous persona's ready state")
+	}
 }

@@ -13,26 +13,12 @@ import (
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/protocol/aries"
 )
 
-// The relay fallback follows the TimeSplitters theater (theater.py and
-// relay_hub.py's RelayPolicy). Each join is one of:
-//
-//   - direct: both consoles get each other's observed endpoints, as before.
-//   - fallback: direct endpoints, with the host's relay port as the alternate
-//     (EGEG INT-IP). The joiner tries the alternate by itself only when its
-//     direct probes fail, so a working direct path is unaffected. This needs a
-//     host whose router accepts packets from the relay without having sent to
-//     it, which the relay's PROB after CGAM tests.
-//   - relay: both consoles get relay addresses. Used for forced personas and
-//     for a joiner whose direct join failed recently (approved, then left
-//     without entering).
-//
-// One room per match holds the host and every player, direct ones too: once
-// the host announces a relayed player's address the other guests send to it.
+// Joins are direct, fallback (relay port as the EGEG alternate) or relay, following
+// the TimeSplitters policy. See docs/games/gera/internet-play.md#relay.
 const (
 	relayControlPort = 18043
-	// failedJoinWindow: an approved guest that leaves without PENT within this
-	// long failed to reach the host (the joiner gives up about 4 s after
-	// approval, 8 s with an alternate).
+	// failedJoinWindow: an approved guest gone without PENT this soon could not reach
+	// the host (the joiner gives up 4 s after approval, 8 s with an alternate).
 	failedJoinWindow = 30 * time.Second
 	relayMemory      = 24 * time.Hour
 	maxRemembered    = 4096
@@ -78,8 +64,8 @@ func (p *relayPolicy) remembered(persona int64) (time.Duration, bool) {
 	return time.Since(at), true
 }
 
-// reason says why a join is relayed, or "" when it is not.
-func (p *relayPolicy) reason(joiner, host identity) string {
+// forcedReason says why an operator rule relays a join, or "" when none does.
+func (p *relayPolicy) forcedReason(joiner, host identity) string {
 	switch {
 	case p.forced["*"]:
 		return "forced_all"
@@ -87,9 +73,6 @@ func (p *relayPolicy) reason(joiner, host identity) string {
 		return "forced_joiner"
 	case p.isForced(host):
 		return "forced_host"
-	}
-	if ago, ok := p.remembered(joiner.personaID); ok {
-		return "failed_join_" + strconv.Itoa(int(ago.Seconds())) + "s_ago"
 	}
 	return ""
 }
@@ -110,10 +93,17 @@ func (p *relayPolicy) recordFailure(persona int64) {
 	p.failed[persona] = time.Now()
 }
 
-// relayDecision picks direct (""), "fallback" or "relay" for a join, with the
-// reason for the log. Callers hold h.mu.
+// relayDecision picks direct (""), "fallback", "relay" or "refuse" for a join,
+// with the reason for the log. Callers hold h.mu.
 func (h *theater) relayDecision(g *hostedGame, joiner identity, joinerIP string) (string, string) {
 	hub := h.srv.relays
+	// Operator rules apply even to a shared public IP, and never fall back to direct.
+	if reason := h.srv.relayPolicy.forcedReason(joiner, g.host); reason != "" {
+		if !hub.Available() {
+			return "refuse", reason + "_no_relay"
+		}
+		return "relay", reason
+	}
 	if hub == nil {
 		return "", "relay_off"
 	}
@@ -121,21 +111,22 @@ func (h *theater) relayDecision(g *hostedGame, joiner identity, joinerIP string)
 		return "", "no_relay_connected"
 	}
 	if joinerIP == g.hostIP {
-		// Behind one router the direct path works, except between PCSX2s in
-		// Sockets mode: they share a virtual address and need the router to
-		// hairpin. After a failed join both sending out to the relay needs no
-		// hairpin.
+		// Same-router joins stay direct except PCSX2 Sockets-mode pairs after a
+		// failed join. See docs/games/gera/internet-play.md#shared-public-ips.
 		if _, failed := h.srv.relayPolicy.remembered(joiner.personaID); failed && g.internalIP == pcsx2SocketIP {
 			return "relay", "same_ip_emulator_after_failed_join"
 		}
 		return "", "same_public_ip"
 	}
-	if reason := h.srv.relayPolicy.reason(joiner, g.host); reason != "" {
-		return "relay", reason
+	if ago, ok := h.srv.relayPolicy.remembered(joiner.personaID); ok {
+		return "relay", "failed_join_" + strconv.Itoa(int(ago.Seconds())) + "s_ago"
 	}
+	current, _ := h.publicEndpoint(h.externalOf(g.owner, g.hostIP, g.port))
 	switch {
 	case g.relayReachable == nil:
 		return "", "host_not_probed"
+	case g.relayProbedEP != current:
+		return "", "host_endpoint_changed"
 	case len(g.relayReachable) == 0:
 		return "", "host_filters_relays"
 	}
@@ -203,6 +194,10 @@ func (h *theater) matchRoom(g *hostedGame, joining map[string]netip.AddrPort, al
 		}
 		return room
 	}
+	if allowed != nil && !allowed[hub.Node(room)] {
+		// The match's room is on a relay that did not pass the host probe.
+		return nil
+	}
 	missing := map[string]netip.AddrPort{}
 	for k, ep := range joining {
 		if _, ok := hub.Port(room, k); !ok {
@@ -260,15 +255,32 @@ func modeName(m string) string {
 	return m
 }
 
-// probeHost asks every relay whether the new host answers a PROB it never
-// asked for.
+// startProbe asks every relay, after a short delay, whether the host answers a
+// PROB it never asked for. At most one probe per match runs. Callers hold h.mu.
+func (h *theater) startProbe(g *hostedGame) {
+	if g.relayProbing || !h.srv.relays.Available() {
+		return
+	}
+	g.relayProbing = true
+	go h.probeHost(g)
+}
+
 func (h *theater) probeHost(g *hostedGame) {
+	defer func() {
+		h.mu.Lock()
+		g.relayProbing = false
+		h.mu.Unlock()
+	}()
 	time.Sleep(relayProbeDelay)
 	hub := h.srv.relays
 	if !hub.Available() {
 		return
 	}
 	h.mu.Lock()
+	if h.games[g.gid] != g { // the host left during the delay
+		h.mu.Unlock()
+		return
+	}
 	target, ok := h.publicEndpoint(h.externalOf(g.owner, g.hostIP, g.port))
 	g.relayProbedAt = time.Now()
 	h.mu.Unlock()
@@ -290,6 +302,7 @@ func (h *theater) probeHost(g *hostedGame) {
 	h.mu.Lock()
 	// Per relay: a router filtering by address can accept one and not another.
 	g.relayReachable = reachable
+	g.relayProbedEP = target
 	h.mu.Unlock()
 	h.srv.opts.Log.Info("relay probe of host", "gid", g.gid, "target", target.String(), "reachable", results)
 }
@@ -303,6 +316,10 @@ func (h *theater) measurePlayer(c *aries.Client) {
 		return
 	}
 	h.mu.Lock()
+	if _, live := h.sessions[c]; !live { // disconnected during the delay
+		h.mu.Unlock()
+		return
+	}
 	target, ok := h.publicEndpoint(h.externalOf(c, c.Addr().String(), feslPort))
 	h.mu.Unlock()
 	if !ok {

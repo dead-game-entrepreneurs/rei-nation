@@ -113,10 +113,12 @@ type ServeOptions struct {
 	// IdleTimeout closes a silent client. Zero uses the 45-second Aries default;
 	// negative sets no read deadline and leaves dead peers to TCP keepalive.
 	IdleTimeout time.Duration
+	// AuthTimeout closes a client that has not called ClearInitialReadDeadline in time.
+	AuthTimeout time.Duration
 }
 
 func ServeWithOptions(ctx context.Context, ln net.Listener, handler Handler, opts ServeOptions) error {
-	transport := Transport{ReadTimeout: opts.IdleTimeout}
+	transport := Transport{ReadTimeout: opts.IdleTimeout, InitialReadTimeout: opts.AuthTimeout}
 	if transport.ReadTimeout == 0 {
 		transport.ReadTimeout = 45 * time.Second
 	} else if transport.ReadTimeout < 0 {
@@ -182,8 +184,8 @@ func ServeTransport(ctx context.Context, ln net.Listener, handler Handler, trans
 }
 
 func serveClient(ctx context.Context, conn net.Conn, h Handler, transport Transport) {
-	// Detect peers that vanish without a FIN, since a long idle window would
-	// otherwise leave the connection open. SSL-wrapped listeners set it themselves.
+	// Detect peers that vanish without a FIN. Wrapped connections such as
+	// ssl2.Conn do not expose this, so their listeners enable it on the raw socket.
 	if ka, ok := conn.(interface {
 		SetKeepAlive(bool) error
 		SetKeepAlivePeriod(time.Duration) error

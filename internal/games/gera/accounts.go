@@ -67,6 +67,7 @@ func (s *server) handleAcct(ctx context.Context, c *aries.Client, m fesl.Message
 	case "logout":
 		a := s.session(c)
 		*a = account{}
+		s.revokeKeys(c, 0)
 		c.Send(fesl.Reply(m, m.TXN))
 	case "getaccount":
 		s.getAccount(ctx, c, m)
@@ -172,7 +173,8 @@ func (s *server) login(ctx context.Context, c *aries.Client, m fesl.Message) {
 	}
 	a := s.session(c)
 	*a = account{id: acc.ID, name: acc.Name}
-	a.lkey = s.issueKey(identity{accountID: acc.ID, personaName: acc.Name})
+	a.lkey = s.issueSessionKey(c, identity{accountID: acc.ID, personaName: acc.Name})
+	c.ClearInitialReadDeadline()
 	s.opts.Log.Info("account login", "conn", c.ID(), "name", acc.Name, "account_id", acc.ID)
 	c.Send(fesl.Reply(m, m.TXN,
 		fesl.Field{Key: "lkey", Value: a.lkey},
@@ -241,7 +243,7 @@ func (s *server) loginSubAccount(ctx context.Context, c *aries.Client, m fesl.Me
 		if strings.EqualFold(p.Name, name) {
 			a.personaID = p.ID
 			a.personaName = p.Name
-			a.lkey = s.issueKey(identity{accountID: a.id, personaID: p.ID, personaName: p.Name})
+			a.lkey = s.issueSessionKey(c, identity{accountID: a.id, personaID: p.ID, personaName: p.Name})
 			s.opts.Log.Info("persona login", "conn", c.ID(), "persona", p.Name, "persona_id", p.ID)
 			c.Send(fesl.Reply(m, m.TXN,
 				fesl.Field{Key: "lkey", Value: a.lkey},

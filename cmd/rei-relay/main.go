@@ -1,16 +1,5 @@
-// Command rei-relay runs a UDP relay node for GoldenEye: Rogue Agent players
-// whose NATs block a direct connection, and sets up the server side.
-//
-// Register a node on the server (writes the relay directory and the node's
-// token file):
-//
-//	rei-relay setup -dir relay -name relay1 -ip 198.51.100.7
-//
-// Then run the node on the machine with that public IP, with the control
-// certificate and token file copied over:
-//
-//	rei-relay -server game.example.com:18043 -cert control-cert.pem \
-//	    -token-file relay1-token.txt -ports 20000-20999
+// Command rei-relay registers and runs UDP relay nodes for GoldenEye: Rogue Agent.
+// See docs/games/gera/internet-play.md for setup.
 package main
 
 import (

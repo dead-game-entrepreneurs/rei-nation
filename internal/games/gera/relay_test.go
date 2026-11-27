@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,9 +21,8 @@ import (
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/protocol/fesl"
 )
 
-// TestTheaterRelayedJoin forces a join through a relay node on loopback and
-// checks that each console is given the other's relay address and that
-// datagrams flow between them through it.
+// TestTheaterRelayedJoin forces a loopback relay join and checks that each side
+// gets the other's relay address and that datagrams flow through it.
 func TestTheaterRelayedJoin(t *testing.T) {
 	joinerIP := net.IPv4(127, 0, 0, 2)
 	if c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: joinerIP}); err != nil {
@@ -37,25 +37,46 @@ func TestTheaterRelayedJoin(t *testing.T) {
 	}
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	// A loopback public IP keeps observed loopback endpoints as they are.
-	s := Definition().New(game.Options{PublicIP: netip.MustParseAddr("127.0.0.1"), Log: quiet,
+	s := Definition(true).New(game.Options{PublicIP: netip.MustParseAddr("127.0.0.1"), Log: quiet,
 		Store: newMemStore(), RelayDir: dir, RelayForce: []string{"*"}}).(*server)
 	if s.relays == nil {
 		t.Fatal("relay hub not loaded")
 	}
+	cert, err := os.ReadFile(filepath.Join(dir, relay.CertFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		control.Close()
+		t.Fatal(err)
+	}
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		control.Close()
+		ln.Close()
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	control, _ := net.Listen("tcp4", "127.0.0.1:0")
-	go s.relays.Serve(ctx, control)
-	cert, _ := os.ReadFile(filepath.Join(dir, relay.CertFile))
+	var wg sync.WaitGroup
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+		udp.Close()
+	})
 	node := &relay.Node{Bind: netip.MustParseAddr("127.0.0.1"), PortLow: 45000, PortHigh: 45999, AllowPrivate: true, Log: quiet}
-	go node.Run(ctx, relay.ControlConfig{Server: control.Addr().String(), CertPEM: cert, Token: token, Name: "test"})
-
-	ln, _ := net.Listen("tcp4", "127.0.0.1:0")
-	udp, _ := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	go aries.ServeWithOptions(ctx, ln, s.theater, aries.ServeOptions{IdleTimeout: time.Minute})
-	go connectivity.ServeUDP(ctx, udp, func(from netip.AddrPort, data []byte) { s.theater.handleEcho(udp, from, data) })
-	defer udp.Close()
+	wg.Go(func() { s.relays.Serve(ctx, control) })
+	wg.Go(func() {
+		node.Run(ctx, relay.ControlConfig{Server: control.Addr().String(), CertPEM: cert, Token: token, Name: "test"})
+	})
+	wg.Go(func() { aries.ServeWithOptions(ctx, ln, s.theater, aries.ServeOptions{IdleTimeout: time.Minute}) })
+	wg.Go(func() {
+		connectivity.ServeUDP(ctx, udp, func(from netip.AddrPort, data []byte) { s.theater.handleEcho(udp, from, data) })
+	})
 	theaterUDP := udp.LocalAddr().(*net.UDPAddr).AddrPort()
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -67,10 +88,16 @@ func TestTheaterRelayedJoin(t *testing.T) {
 	}
 
 	// The consoles' game sockets.
-	hostUDP, _ := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	defer hostUDP.Close()
-	joinUDP, _ := net.ListenUDP("udp4", &net.UDPAddr{IP: joinerIP})
-	defer joinUDP.Close()
+	hostUDP, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { hostUDP.Close() })
+	joinUDP, err := net.ListenUDP("udp4", &net.UDPAddr{IP: joinerIP})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { joinUDP.Close() })
 	echo := func(c *net.UDPConn, fields ...fesl.Field) {
 		t.Helper()
 		var b bytes.Buffer

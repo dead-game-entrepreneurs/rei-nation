@@ -29,15 +29,20 @@ func main() {
 	health := flag.Bool("healthcheck", false, "check the local readiness endpoint")
 	flag.Parse()
 	var dest io.Writer = os.Stderr
-	// REI_NATION_LOG_FILE additionally writes logs to a file, which is useful on
-	// Windows where piping a program's stderr mangles it.
+	// REI_NATION_LOG_FILE also appends logs to a file; piping stderr on Windows mangles it.
+	var logFileErr error
 	if path := os.Getenv("REI_NATION_LOG_FILE"); path != "" && !*health {
-		if f, err := os.Create(path); err == nil {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err == nil {
 			defer f.Close()
 			dest = io.MultiWriter(os.Stderr, f)
 		}
+		logFileErr = err
 	}
 	log := slog.New(slog.NewJSONHandler(dest, nil))
+	if logFileErr != nil {
+		log.Warn("REI_NATION_LOG_FILE not opened; logging to stderr only", "error", logFileErr)
+	}
 	if err := run(*health, log); err != nil {
 		log.Error("Rei Nation stopped", "error", err)
 		os.Exit(1)
@@ -82,7 +87,7 @@ func run(health bool, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	selected, err := conf.Select([]game.Definition{nascar04.Definition(), gera.Definition(),
+	selected, err := conf.Select([]game.Definition{nascar04.Definition(), gera.Definition(conf.RelayDir != ""),
 		tsfp.Definition(env("REI_NATION_TSFP_CERT", "/tsfp-certs/fesl-cert.pem"),
 			env("REI_NATION_TSFP_KEY", "/tsfp-certs/fesl-key.pem"),
 			os.Getenv("REI_NATION_TSFP_RELAY_IP"), tsfp.RemoteRelayConfig{

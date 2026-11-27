@@ -21,9 +21,8 @@ const (
 	openTimeout = 3 * time.Second
 	// The node waits up to 2 s for the console's answer.
 	probeTimeout = 4 * time.Second
-	// Relay choice: a player's round trips are re-measured after
-	// latencyRefresh and ignored after latencyMaxAge; a player without one
-	// counts as unmeasuredMS on every relay.
+	// Round trips are re-measured after latencyRefresh and dropped after latencyMaxAge;
+	// an unmeasured player counts as unmeasuredMS on every relay.
 	latencyRefresh = 10 * time.Minute
 	latencyMaxAge  = 3 * time.Hour
 	unmeasuredMS   = 250
@@ -131,11 +130,15 @@ func (h *Hub) Available() bool {
 // Serve accepts node control connections until ctx ends.
 func (h *Hub) Serve(ctx context.Context, ln net.Listener) error {
 	tl := tls.NewListener(ln, h.tls)
+	// Cancelling on any return closes the listener and every node link, so a
+	// fatal Accept error is returned instead of waiting on live links.
+	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(ctx, func() { tl.Close() })
 	defer stop()
 	h.log.Info("relay control listening", "addr", ln.Addr().String(), "nodes", len(h.tokens))
 	var wg sync.WaitGroup
 	defer wg.Wait()
+	defer cancel()
 	for {
 		conn, err := tl.Accept()
 		if err != nil {
@@ -300,11 +303,12 @@ func slicesWithout(s []string, v string) []string {
 func (h *Hub) dropLink(l *link) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.links[l.name] != l {
-		return
+	// A link replaced by a reconnect still loses its rooms; only the current
+	// link is removed from the node list.
+	if h.links[l.name] == l {
+		delete(h.links, l.name)
+		h.order = slicesWithout(h.order, l.name)
 	}
-	delete(h.links, l.name)
-	h.order = slicesWithout(h.order, l.name)
 	var lost []string
 	for id, room := range h.rooms {
 		if room.link == l {
@@ -342,10 +346,8 @@ func (h *Hub) request(ctx context.Context, l *link, m message, timeout time.Dura
 	}
 }
 
-// ProbeAll sends a PROB to target from every relay at once and reports, per
-// relay that answered the server, whether the console answered. A console
-// answers any PROB request, so an answer means its router lets in packets from
-// that relay without having sent to it first. Round trips feed relay choice.
+// ProbeAll reports, per answering relay, whether target answered an unsolicited
+// PROB, meaning its router admits that relay. Round trips feed relay choice.
 func (h *Hub) ProbeAll(ctx context.Context, target netip.AddrPort) map[string]bool {
 	if h == nil {
 		return nil
@@ -503,13 +505,22 @@ func (h *Hub) OpenRoom(ctx context.Context, members map[string]netip.AddrPort, a
 	h.mu.Unlock()
 	h.log.Info("relay choice", "match", label, "room", room.ID, "node", l.name)
 	if !h.add(ctx, room, members) {
+		// Close the new room on the node too, releasing any ports it bound.
 		h.mu.Lock()
 		delete(h.rooms, room.ID)
+		room.closed = true
+		live := h.links[l.name] == l
 		h.mu.Unlock()
+		if live {
+			l.send(message{Op: "close", Room: room.ID})
+		}
 		return nil
 	}
 	return room
 }
+
+// Node names the relay that holds room.
+func (h *Hub) Node(room *Room) string { return room.link.name }
 
 // AddMembers adds players to an open room.
 func (h *Hub) AddMembers(ctx context.Context, room *Room, members map[string]netip.AddrPort) bool {

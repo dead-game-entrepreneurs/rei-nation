@@ -75,7 +75,7 @@ func (s *memStore) Personas(_ context.Context, account int64) ([]storage.Persona
 // socket, by pairing the handler with a lightweight in-memory client.
 func newTestServer(t *testing.T) *server {
 	t.Helper()
-	def := Definition()
+	def := Definition(false)
 	opts := game.Options{PublicIP: netip.MustParseAddr("192.0.2.10"),
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Store: newMemStore()}
 	return def.New(opts).(*server)
@@ -181,8 +181,39 @@ func TestAccountFlow(t *testing.T) {
 	}
 	persona := call("acct", "LoginSubAccount", fesl.Field{Key: "name", Value: "Agent47"})
 	noError(persona)
-	if v, _ := persona.Get("lkey"); v == "" {
+	personaKey, _ := persona.Get("lkey")
+	if personaKey == "" {
 		t.Fatal("persona login did not return an lkey")
+	}
+	if _, ok := s.lookupKey(personaKey); !ok {
+		t.Fatal("persona key not accepted while logged in")
+	}
+
+	// Logout revokes every key the connection was issued.
+	noError(call("acct", "Logout"))
+	loginKey, _ := login.Get("lkey")
+	for _, key := range []string{loginKey, personaKey} {
+		if _, ok := s.lookupKey(key); ok {
+			t.Fatal("key still accepted after logout")
+		}
+	}
+}
+
+func TestSessionKeyExpiresAfterDisconnect(t *testing.T) {
+	s := newTestServer(t)
+	c := &aries.Client{}
+	key := s.issueSessionKey(c, identity{accountID: 1, personaID: 2, personaName: "Agent47"})
+	s.revokeKeys(c, time.Minute)
+	if _, ok := s.lookupKey(key); !ok {
+		t.Fatal("key revoked before its reconnect grace ended")
+	}
+	s.keysMu.Lock()
+	e := s.keys[key]
+	e.expires = time.Now().Add(-time.Second)
+	s.keys[key] = e
+	s.keysMu.Unlock()
+	if _, ok := s.lookupKey(key); ok {
+		t.Fatal("key accepted after its grace ended")
 	}
 }
 

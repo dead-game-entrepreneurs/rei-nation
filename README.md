@@ -135,6 +135,10 @@ Allow these ports for the features you use.
 | TCP 18072 | TSFP Messenger |
 | TCP 18073 | Optional remote-relay control; restrict to the registered relay IP |
 | UDP 20000–20255 | Optional TSFP peer relay on its separate public address |
+| TCP 18040 | GoldenEye FESL (SSL 2.0), when `gera` is enabled |
+| TCP and UDP 18041 | GoldenEye Theater and endpoint discovery |
+| TCP 18042 | GoldenEye Messenger |
+| TCP 18043 | Optional GoldenEye relay-node sign-in; restrict to the registered relay IP |
 
 PostgreSQL and `/healthz` bind to the host loopback interface on ports `55434` and `8086` by default. `docker compose down` stops both services and keeps the database volume. The legacy client uses plaintext Aries on the network. Create an account password dedicated to the game.
 
@@ -180,6 +184,12 @@ only from the registered relay address.
 ```sh
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o tsfp-relay ./cmd/tsfp-relay
 ```
+
+GoldenEye has its own optional relay, `cmd/rei-relay`. Register a node with
+`rei-relay setup`, then set `REI_NATION_GERA_RELAY_DIR=/gera-relay` and point
+`REI_NATION_GERA_RELAY_HOST_DIR` at the directory it wrote; Compose mounts it
+read-only. `REI_NATION_GERA_RELAY_FORCE` lists personas that always join through
+a relay. See [GoldenEye Internet play](docs/games/gera/internet-play.md#relay).
 
 ### Messenger and account recovery
 

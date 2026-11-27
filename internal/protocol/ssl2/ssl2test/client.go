@@ -1,7 +1,5 @@
-// Package ssl2test provides an SSL 2.0 RC4-MD5 client for exercising the ssl2
-// server transport in tests. It is an independent implementation of the same
-// handshake, so a test that uses it does not lean on the server's own code for
-// its expectations. It is test support, not a production client.
+// Package ssl2test is an independent SSL 2.0 RC4-MD5 test client, so tests do not
+// derive their expectations from the server's own code.
 package ssl2test
 
 import (
@@ -176,10 +174,8 @@ func (c *Client) readRecord() ([]byte, error) {
 	return content, nil
 }
 
-// PublicKeyFromCertificate extracts the RSA public key from a certificate DER
-// by reading its SubjectPublicKeyInfo directly. The server's certificate uses
-// the ProtoSSL workaround, whose inner and outer signature algorithms differ,
-// so crypto/x509.ParseCertificate rejects it; the PS2 client's parser does not.
+// PublicKeyFromCertificate reads the RSA key from SubjectPublicKeyInfo, because
+// crypto/x509 rejects the deliberately mismatched signature OIDs.
 func PublicKeyFromCertificate(der []byte) (*rsa.PublicKey, error) {
 	var cert struct {
 		Raw asn1.RawContent

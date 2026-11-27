@@ -1,10 +1,5 @@
-// Package fesl implements EA FESL message bodies and header codes.
-//
-// FESL shares the Aries 12-byte header: a four-character service, a
-// big-endian code word, and a big-endian size that includes the header. The
-// body is newline-separated key=value text ending in NUL. This package reads and
-// writes frames through package aries and adds the FESL meaning of the code
-// word and the transaction body.
+// Package fesl reads and writes EA FESL bodies over the Aries header.
+// See docs/games/gera/online-map.md#framing for the layout.
 package fesl
 
 import (
@@ -31,9 +26,8 @@ type Message struct {
 	fields map[string]string
 }
 
-// Decode parses a frame body. Keys keep their case; values are unquoted and
-// percent-decoded. TXN is matched without regard to case because clients and
-// servers differ in capitalization.
+// Decode parses a frame body, unquoting and percent-decoding values. TXN is
+// matched case-insensitively because implementations differ.
 func Decode(f aries.Frame) Message {
 	m := Message{Service: f.Tag, Code: binary.BigEndian.Uint32(f.Code[:]), fields: make(map[string]string)}
 	for line := range strings.SplitSeq(f.Body, "\n") {
@@ -67,9 +61,8 @@ func (m Message) Fields() map[string]string {
 	return out
 }
 
-// Prefixed returns the fields whose key starts with prefix (case-insensitive),
-// with each returned key upper-cased. The theater carries game, detail and
-// player attributes as b-, d- and p- prefixed fields.
+// Prefixed returns the fields whose key starts with prefix, case-insensitively,
+// keyed by the upper-cased remainder (theater b-, d- and p- attributes).
 func (m Message) Prefixed(prefix string) map[string]string {
 	out := map[string]string{}
 	for k, v := range m.fields {
@@ -106,10 +99,8 @@ func Reply(req Message, txn string, fields ...Field) aries.Frame {
 	return Encode(req.Service, req.Code, txn, fields...)
 }
 
-// Packet builds a frame whose command is the service tag and whose code word is
-// a status, with a body of ordered key=value fields and no TXN line. The
-// messenger and theater services use this shape; the acct and fsys services use
-// Encode, which leads with TXN.
+// Packet builds a messenger or theater frame: the tag is the command, the code
+// is a status, and the body has no TXN line.
 func Packet(service string, code uint32, fields ...Field) aries.Frame {
 	var b strings.Builder
 	for _, f := range fields {
@@ -123,10 +114,8 @@ func Packet(service string, code uint32, fields ...Field) aries.Frame {
 	return fr
 }
 
-// Encode builds a frame with TXN first and the remaining fields in order.
-// Values are percent-encoded so control characters, delimiters and non-ASCII
-// bytes survive the newline-delimited body; a value containing a space is
-// quoted.
+// Encode builds an acct or fsys frame with TXN first; values are percent-encoded
+// and a value containing a space is quoted.
 func Encode(service string, code uint32, txn string, fields ...Field) aries.Frame {
 	var b strings.Builder
 	b.WriteString("TXN=")
