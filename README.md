@@ -43,7 +43,7 @@
 | Physical consoles, other disc regions and Internet NAT combinations | 🧪 awaiting wider testing |
 | Relay for EA SPORTS Talk | Unimplemented |
 
-**GoldenEye: Rogue Agent** (US PS2, `SLUS-21064`) has a `gera` adapter that uses EA FESL. Two PCSX2 machines on one LAN have signed in, registered accounts and personas, come online in the messenger, hosted, joined and played a full match. Stats, leaderboards and buddy lists are implemented but not yet tried in game. Play between different networks has not been tested, and voice chat is not done. See the [GoldenEye notes](docs/games/gera/online-map.md) and [Internet play](docs/games/gera/internet-play.md).
+**GoldenEye: Rogue Agent** (US PS2, `SLUS-21064`) has a `gera` adapter that uses EA FESL. Two PCSX2 machines on one LAN have signed in, registered accounts and personas, come online in the messenger, hosted, joined and played a full match. Stats, leaderboards and buddy lists are implemented but not yet tried in game. Play between different networks has not been tested. An optional UDP relay for strict NATs (`cmd/rei-relay`, ported from the TimeSplitters server) has only loopback tests. Voice chat is not done. See the [GoldenEye notes](docs/games/gera/online-map.md) and [Internet play](docs/games/gera/internet-play.md).
 
 The client owns race simulation. The server handles accounts, rooms, Messenger, peer setup, and ranked statistics. Message history is restored after the client loads its buddy and ignore lists. The game can display restored messages as unread again.
 

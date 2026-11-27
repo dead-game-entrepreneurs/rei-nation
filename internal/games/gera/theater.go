@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dead-game-entrepreneurs/rei-nation/internal/games/gera/relay"
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/protocol/aries"
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/protocol/fesl"
 )
@@ -85,6 +86,13 @@ type hostedGame struct {
 	players      map[int]*gamePlayer
 	pending      map[int]*gamePlayer
 	nextPID      int
+
+	// Relay fallback state; see relaypolicy.go. relayReachable is nil until
+	// the relays have probed the host, then the relays it answered.
+	relayRoom      *relay.Room
+	relayReachable map[string]bool
+	relayProbedAt  time.Time
+	relayMu        sync.Mutex // serializes opening and growing relayRoom
 }
 
 type gamePlayer struct {
@@ -97,6 +105,12 @@ type gamePlayer struct {
 	lid     string // the lobby the joiner asked from; echoed in EGEG
 	entered bool
 	attrs   map[string]string
+
+	approvedAt time.Time
+	relayMode  string // "", "fallback" or "relay"
+	relayed    bool   // the host was given this player's relay address
+	// opening delivers the fallback room (or nil) once the joiner is in it.
+	opening chan *relay.Room
 }
 
 func (h *theater) session(c *aries.Client) *theaterSession {
@@ -150,6 +164,8 @@ func (h *theater) leaveGame(g *hostedGame, c *aries.Client) []kick {
 	var out []kick
 	for pid, p := range g.players {
 		if p.writer == c {
+			h.noteFailedJoin(g, pid, p)
+			h.releaseRelay(g, pid)
 			delete(g.players, pid)
 			if c != g.owner {
 				out = append(out, kick{host: g.owner, gid: g.gid, pid: pid})
@@ -158,6 +174,7 @@ func (h *theater) leaveGame(g *hostedGame, c *aries.Client) []kick {
 	}
 	for pid, p := range g.pending {
 		if p.writer == c {
+			h.releaseRelay(g, pid)
 			delete(g.pending, pid)
 		}
 	}
@@ -185,6 +202,10 @@ type removal struct {
 // an error instead of returning cleanly. Callers hold h.mu.
 func (h *theater) closeGame(g *hostedGame) []removal {
 	delete(h.games, g.gid)
+	if g.relayRoom != nil {
+		go h.srv.relays.CloseRoom(g.relayRoom)
+		g.relayRoom = nil
+	}
 	var out []removal
 	seen := map[*aries.Client]bool{g.owner: true}
 	for _, list := range []map[int]*gamePlayer{g.players, g.pending} {
@@ -270,6 +291,9 @@ func (h *theater) user(c *aries.Client, m fesl.Message, tid string) {
 	h.mu.Unlock()
 	h.srv.opts.Log.Info("theater auth", "conn", c.ID(), "persona", id.personaName, "persona_id", id.personaID)
 	c.Send(fesl.Packet("USER", msgOK, field("TID", tid), field("NAME", id.personaName)))
+	if h.srv.relays.Available() {
+		go h.measurePlayer(c)
+	}
 }
 
 // lobbyName is the lobby the client will host and join in. After each lobby
@@ -416,9 +440,13 @@ func (h *theater) createGame(c *aries.Client, m fesl.Message, tid string) {
 		attrs: m.Prefixed("b-"), details: map[string]string{},
 		players: map[int]*gamePlayer{}, pending: map[int]*gamePlayer{}, nextPID: 2,
 	}
-	secret := h.games[gid].secret
+	created := h.games[gid]
+	secret := created.secret
 	h.mu.Unlock()
 	sendRemovals(notices)
+	if h.srv.relays.Available() {
+		go h.probeHost(created)
+	}
 
 	h.srv.opts.Log.Info("theater game created", "conn", c.ID(), "gid", gid, "name", name, "host", t.id.personaName)
 	c.Send(fesl.Packet("CGAM", msgOK, field("TID", tid), field("LID", lid), field("GID", strconv.Itoa(gid)),
@@ -471,17 +499,78 @@ func (h *theater) enterGame(c *aries.Client, m fesl.Message, tid string) {
 	if !validID(lid) {
 		lid = g.lid
 	}
-	g.pending[pid] = &gamePlayer{writer: c, name: t.id.personaName, uid: t.id.personaID, ip: joinerIP, port: port, ticket: ticket, lid: lid, attrs: map[string]string{}}
+	joiner := &gamePlayer{writer: c, name: t.id.personaName, uid: t.id.personaID, ip: joinerIP, port: port, ticket: ticket, lid: lid, attrs: map[string]string{}}
+	g.pending[pid] = joiner
 	ext := h.reachable(h.externalOf(c, joinerIP, port), h.connIP[g.owner])
+	relayEP, relayable := h.publicEndpoint(h.externalOf(c, joinerIP, port))
 	owner := g.owner
+	mode, reason := "", ""
+	if !self {
+		mode, reason = h.relayDecision(g, t.id, joinerIP)
+		if !relayable {
+			mode = ""
+		}
+		joiner.relayMode = mode
+		if mode != "" && time.Since(g.relayProbedAt) > relayProbeRefresh {
+			go h.probeHost(g) // mappings and routers change in a long match
+		}
+	}
+	reachable := g.relayReachable
+	hasRoom := g.relayRoom != nil
 	h.mu.Unlock()
 
-	egrq := fesl.Packet("EGRQ", msgOK, field("TID", "0"), field("NAME", t.id.personaName),
-		field("UID", strconv.FormatInt(t.id.personaID, 10)), field("PID", strconv.Itoa(pid)),
-		field("TICKET", ticket), field("IP", ext.ip), field("PORT", strconv.Itoa(ext.port)))
 	c.Send(fesl.Packet("EGAM", msgOK, field("TID", tid), field("REASON", "0"), field("QPOS", "0"), field("QLEN", "0")))
 	h.srv.opts.Log.Info("theater join request", "conn", c.ID(), "gid", gid, "pid", pid, "persona", t.id.personaName)
-	owner.Send(egrq) // for a self-join, owner == c
+	if h.srv.relays != nil && !self {
+		h.srv.opts.Log.Info("relay decision", "gid", gid, "pid", pid, "persona_id", t.id.personaID,
+			"mode", modeName(mode), "reason", reason)
+	}
+	egrq := func(a addr) aries.Frame {
+		return fesl.Packet("EGRQ", msgOK, field("TID", "0"), field("NAME", t.id.personaName),
+			field("UID", strconv.FormatInt(t.id.personaID, 10)), field("PID", strconv.Itoa(pid)),
+			field("TICKET", ticket), field("IP", a.ip), field("PORT", strconv.Itoa(a.port)))
+	}
+	switch {
+	case mode == "relay":
+		// EGRQ waits for the room so the host's probes find the relay port
+		// already open; without a room the join goes ahead direct.
+		go func() {
+			room := h.roomMember(g, pid, relayEP, nil)
+			address := ext
+			h.mu.Lock()
+			_, still := g.pending[pid]
+			if room != nil && still {
+				if ep, ok := h.srv.relays.Port(room, strconv.Itoa(pid)); ok {
+					// The host reaches the joiner at its relay port.
+					joiner.relayed = true
+					address = addr{ep.Addr().String(), int(ep.Port())}
+				}
+			}
+			if !joiner.relayed {
+				joiner.relayMode = ""
+			}
+			relayed := joiner.relayed
+			h.mu.Unlock()
+			if !still {
+				return
+			}
+			h.srv.opts.Log.Info("theater join relayed", "gid", gid, "pid", pid, "relayed", relayed,
+				"address", address.ip+":"+strconv.Itoa(address.port))
+			owner.Send(egrq(address))
+		}()
+		return
+	case mode == "fallback":
+		opening := make(chan *relay.Room, 1)
+		h.mu.Lock()
+		joiner.opening = opening
+		h.mu.Unlock()
+		go func() { opening <- h.roomMember(g, pid, relayEP, reachable) }()
+	case hasRoom && !self && relayable:
+		// A direct joiner of a match with a relay room joins it too, so
+		// relayed players can reach it.
+		go h.roomMember(g, pid, relayEP, nil)
+	}
+	owner.Send(egrq(ext)) // for a self-join, owner == c
 }
 
 func (h *theater) joinResponse(c *aries.Client, m fesl.Message, tid string) {
@@ -517,7 +606,20 @@ func (h *theater) joinResponse(c *aries.Client, m fesl.Message, tid string) {
 		ticket = ""
 	}
 	primary, alternate := h.hostAddresses(g, pending.ip, pending.writer == g.owner)
+	if pending.relayMode == "relay" && pending.relayed && g.relayRoom != nil {
+		if ep, ok := h.srv.relays.Port(g.relayRoom, hostKey); ok {
+			// INT-IP 0 makes the joiner skip its alternate-address retry.
+			primary, alternate = addr{ep.Addr().String(), int(ep.Port())}, addr{"0.0.0.0", 0}
+		}
+	}
+	opening := pending.opening
+	pending.opening = nil
+	if !approved {
+		h.releaseRelay(g, pid)
+		opening = nil
+	}
 	if approved {
+		pending.approvedAt = time.Now()
 		pending.entered = false
 		g.players[pid] = pending
 		if g.host.personaID != 0 && pending.uid != 0 && pending.uid != g.host.personaID {
@@ -545,6 +647,34 @@ func (h *theater) joinResponse(c *aries.Client, m fesl.Message, tid string) {
 	if tid != "0" {
 		c.Send(fesl.Packet("EGRS", msgOK, field("TID", tid)))
 	}
+	if opening != nil {
+		// A fallback approval waits briefly for the joiner to be in the room,
+		// then offers the host's relay port as the alternate address.
+		go func() {
+			var room *relay.Room
+			select {
+			case room = <-opening:
+			case <-time.After(relayFallbackWait):
+			}
+			alt := alternate
+			if room != nil {
+				if ep, ok := h.srv.relays.Port(room, hostKey); ok {
+					alt = addr{ep.Addr().String(), int(ep.Port())}
+				}
+			}
+			h.srv.opts.Log.Info("theater join fallback", "gid", gid, "pid", pid, "relay", room != nil,
+				"alternate", alt.ip+":"+strconv.Itoa(alt.port))
+			h.sendJoinAnswer(c, joiner, self, lid, gid, pid, ticket, reason, primary, alt, approved)
+		}()
+		return
+	}
+	h.sendJoinAnswer(c, joiner, self, lid, gid, pid, ticket, reason, primary, alternate, approved)
+}
+
+// sendJoinAnswer sends EGEG to the joiner; the host's own self-join gets it
+// on its connection.
+func (h *theater) sendJoinAnswer(c, joiner *aries.Client, self bool, lid string, gid, pid int,
+	ticket, reason string, primary, alternate addr, approved bool) {
 	egeg := fesl.Packet("EGEG", msgOK, field("TID", "0"), field("LID", lid), field("GID", strconv.Itoa(gid)),
 		field("PID", strconv.Itoa(pid)), field("TICKET", ticket), field("REASON", reason),
 		field("I", primary.ip), field("P", strconv.Itoa(primary.port)), field("PL", "PS2"), field("UGID", strconv.Itoa(gid)),
@@ -583,6 +713,7 @@ func (h *theater) playerLeft(c *aries.Client, m fesl.Message, tid string) {
 	h.mu.Lock()
 	for _, g := range h.games {
 		if g.owner == c {
+			h.releaseRelay(g, pid)
 			delete(g.players, pid)
 			delete(g.pending, pid)
 		}

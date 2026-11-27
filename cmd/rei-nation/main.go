@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -70,7 +71,11 @@ func run(health bool, log *slog.Logger) error {
 		return errors.New("invalid REI_NATION_PUBLIC_IP")
 	}
 	conf := app.Config{Games: env("REI_NATION_GAMES", "nascar04"), Bind: bind, PublicIP: publicIP,
-		HealthPort: uint16(healthPort), Relay: env("REI_NATION_RELAY", "auto")}
+		HealthPort: uint16(healthPort), Relay: env("REI_NATION_RELAY", "auto"),
+		RelayDir: os.Getenv("REI_NATION_GERA_RELAY_DIR")}
+	if force := os.Getenv("REI_NATION_GERA_RELAY_FORCE"); force != "" {
+		conf.RelayForce = strings.Split(force, ",")
+	}
 	conf.SendRecoveryMail, err = app.NewRecoverySender(os.Getenv("REI_NATION_SMTP_ADDR"), os.Getenv("REI_NATION_SMTP_FROM"),
 		os.Getenv("REI_NATION_SMTP_USER"), os.Getenv("REI_NATION_SMTP_PASSWORD"))
 	if err != nil {

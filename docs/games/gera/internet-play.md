@@ -21,10 +21,8 @@ guest for about 4 seconds.
 
 This works through most home routers. It fails when both sides have strict
 NATs that pick a new public port for every destination, or when a firewall
-drops unsolicited UDP. Rei Nation has no relay for those cases yet. The
-TimeSplitters audit notes that a relay sharing the server's public IP would
-be mistaken by the client for server traffic, so a relay needs a separate
-address.
+drops unsolicited UDP. For those cases Rei Nation has an optional UDP relay,
+described below.
 
 To make hosting reliable, the hosting player should forward **UDP 18040** to
 the PC running PCSX2 (or to the PS2). The client uses that fixed port for all
@@ -54,6 +52,7 @@ almost any NAT.
    | 18041 | TCP | Theater game browser |
    | 18041 | UDP | Theater `ECHO` and endpoint keepalive |
    | 18042 | TCP | Messenger |
+   | 18043 | TCP | Relay node sign-in (only with a relay; open to the node's IP) |
 
    PostgreSQL and the health endpoint stay on `127.0.0.1`; do not expose them.
 6. Keep TCP keepalive and the UDP keepalive running (both are on by default).
@@ -61,6 +60,56 @@ almost any NAT.
    PCSX2 from closing it during a level load and keeps router mappings open.
 
 To keep a log file when running outside Docker, set `REI_NATION_LOG_FILE`.
+
+## Relay fallback
+
+The relay is a port of the TimeSplitters server's relay, which serves the
+same FESL library. It runs as a separate program, `rei-relay`, on a machine
+with **its own public IP**: the client treats every datagram from the
+theater's address as server traffic, so a relay on the server's IP would not
+work. A small cloud VM is enough.
+
+1. On the server, register the node:
+
+   ```sh
+   rei-relay setup -dir relay -name relay1 -ip <node public IPv4>
+   ```
+
+   This writes `relay/control-cert.pem`, `relay/control-key.pem`,
+   `relay/tokens.txt` and `relay/relay1-token.txt`. Keep the directory out
+   of version control (it is in `.gitignore`).
+2. Set `REI_NATION_GERA_RELAY_DIR=relay` and restart the server. Open
+   **TCP 18043** to the node's IP; nodes sign in there over TLS.
+3. Copy `control-cert.pem` and `relay1-token.txt` to the node, delete the
+   token file on the server, and run:
+
+   ```sh
+   rei-relay -server <server address>:18043 -cert control-cert.pem \
+       -token-file relay1-token.txt -ports 20000-20999
+   ```
+
+   Open the UDP port range on the node. Each relayed player uses one port.
+
+The node pins the server's certificate, and the server accepts a token only
+from the IP registered with it, which is also the address players are sent
+to. The node relays only between the public addresses of a match's players,
+forwards one datagram per datagram, limits each player to 512 KB/s, and
+closes a room after three minutes without traffic.
+
+How a join uses the relay (logged as `relay decision`):
+
+- **Direct** is the default. Players on the same public IP always go direct.
+- **Fallback**: when the relay's probe after `CGAM` shows the host's router
+  accepts packets from the relay, the joiner gets the host's direct address
+  plus the host's relay port as its alternate. The game tries the alternate
+  only if the direct probes fail.
+- **Relay**: both consoles get relay addresses. This is used for personas in
+  `REI_NATION_GERA_RELAY_FORCE` (or every join with `*`), and for a joiner
+  whose last direct join failed (approved but left without entering within
+  30 seconds). That memory lasts 24 hours and is lost on restart.
+
+Not yet tested in game: relay rooms, probes and both join modes are covered
+by loopback tests only.
 
 ## Players
 
@@ -95,7 +144,7 @@ Treat this as a test service.
 
 ## Known gaps
 
-- No UDP relay for strict NAT on both sides.
+- The relay has been tested only on loopback, not with consoles.
 - Voice chat uses ProtoMangle at `demangler.ea.com` on port 3658 (feature
   `gera-ps2-2004`), which this title does not serve yet. Gameplay does not
   depend on it. NASCAR 04's demangler uses the same port, so the two titles

@@ -28,12 +28,17 @@ type Runtime interface {
 }
 
 type Options struct {
-	PublicIP         netip.Addr
-	TCPPort          uint16
-	Store            storage.IdentityStore
-	Log              *slog.Logger
-	AuxTCP           map[uint16]net.Listener
-	UDP              map[uint16]*net.UDPConn
-	Relay            string
+	PublicIP netip.Addr
+	TCPPort  uint16
+	Store    storage.IdentityStore
+	Log      *slog.Logger
+	AuxTCP   map[uint16]net.Listener
+	UDP      map[uint16]*net.UDPConn
+	Relay    string
+	// RelayDir and RelayForce configure the GoldenEye relay hub: the directory
+	// with its control certificate and node tokens, and personas (names or
+	// IDs, "*" for all) whose joins always go through a relay.
+	RelayDir         string
+	RelayForce       []string
 	SendRecoveryMail func(ctx context.Context, recipient, subject, body string) error
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/connectivity"
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/game"
+	"github.com/dead-game-entrepreneurs/rei-nation/internal/games/gera/relay"
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/protocol/aries"
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/protocol/fesl"
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/protocol/ssl2"
@@ -32,6 +33,8 @@ const (
 	// will use once it does.
 	theaterPort   = 18041
 	messengerPort = 18042
+	// relayControlPort (relaypolicy.go) is where relay nodes sign in; it
+	// is served only when REI_NATION_GERA_RELAY_DIR is set.
 	// No application read deadline on any of the three connections: the client
 	// goes silent for minutes while loading a level and expects its session to
 	// survive. aries enables TCP keepalive, which drops a genuinely dead peer.
@@ -43,13 +46,22 @@ const (
 )
 
 func Definition() game.Definition {
-	return game.Definition{Key: gameKey, TCPPort: feslPort, AuxTCP: []uint16{messengerPort, theaterPort},
+	return game.Definition{Key: gameKey, TCPPort: feslPort, AuxTCP: []uint16{messengerPort, theaterPort, relayControlPort},
 		UDP: []uint16{theaterPort},
 		New: func(opts game.Options) game.Runtime {
 			s := &server{opts: opts, sessions: make(map[*aries.Client]*account), keys: make(map[string]identity)}
 			s.store, _ = opts.Store.(storage.IdentityStore)
 			s.stats, _ = opts.Store.(storage.StatsStore)
 			s.social, _ = opts.Store.(socialStore)
+			s.relayPolicy = newRelayPolicy(opts.RelayForce)
+			if opts.RelayDir != "" {
+				hub, err := relay.LoadHub(opts.RelayDir, opts.Log.With("service", "relay"))
+				if err != nil {
+					opts.Log.Error("relay hub not started", "dir", opts.RelayDir, "error", err)
+				} else {
+					s.relays = hub
+				}
+			}
 			s.messenger = &messenger{srv: s, sessions: make(map[*aries.Client]*presence)}
 			s.theater = &theater{srv: s, sessions: make(map[*aries.Client]*theaterSession),
 				games: make(map[int]*hostedGame), connIP: make(map[*aries.Client]string),
@@ -83,6 +95,9 @@ type server struct {
 	social    socialStore
 	messenger *messenger
 	theater   *theater
+	// relays is nil when no relay directory is configured.
+	relays      *relay.Hub
+	relayPolicy *relayPolicy
 
 	mu       sync.Mutex
 	sessions map[*aries.Client]*account
@@ -128,6 +143,13 @@ func (s *server) Services() []func(context.Context) error {
 			return aries.ServeWithOptions(ctx, ln, s.theater,
 				aries.ServeOptions{Heartbeat: "PING", IdleTimeout: theaterIdle})
 		})
+	}
+	if ln := s.opts.AuxTCP[relayControlPort]; ln != nil {
+		if s.relays != nil {
+			services = append(services, func(ctx context.Context) error { return s.relays.Serve(ctx, ln) })
+		} else {
+			ln.Close()
+		}
 	}
 	if udp := s.opts.UDP[theaterPort]; udp != nil {
 		services = append(services, func(ctx context.Context) error {
