@@ -356,3 +356,114 @@ func TestTheaterGamesVisibleAcrossLobbies(t *testing.T) {
 		t.Fatalf("GREM LID = %q, want the joiner's lobby 1", v)
 	}
 }
+
+// joinApproved runs a guest through EGAM, the host's approval and EGEG, and
+// returns the guest's PID.
+func joinApproved(t *testing.T, host, guest *theaterClient, gid string) string {
+	t.Helper()
+	guest.send("EGAM", field("tid", "20"), field("gid", gid), field("lid", "1"), field("port", "18040"))
+	if m := guest.read(); m.Service != "EGAM" || m.Code != msgOK {
+		t.Fatalf("EGAM = %s %#x", m.Service, m.Code)
+	}
+	egrq := host.read()
+	if egrq.Service != "EGRQ" {
+		t.Fatalf("host expected EGRQ, got %s", egrq.Service)
+	}
+	pid, _ := egrq.Get("PID")
+	host.send("EGRS", field("tid", "21"), field("pid", pid), field("allowed", "1"))
+	if m := host.read(); m.Service != "EGRS" {
+		t.Fatalf("host EGRS reply = %s", m.Service)
+	}
+	if m := guest.read(); m.Service != "EGEG" {
+		t.Fatalf("guest expected EGEG, got %s", m.Service)
+	}
+	return pid
+}
+
+// An approved guest that cancels or drops must be reported to the host with
+// KICK, or the host keeps its seat reserved and the game fills up for good.
+func TestTheaterKicksHostWhenApprovedGuestLeaves(t *testing.T) {
+	s := newTestServer(t)
+	hostKey := s.issueKey(identity{accountID: 1, personaID: 10, personaName: "Host"})
+	aKey := s.issueKey(identity{accountID: 2, personaID: 20, personaName: "Canceller"})
+	bKey := s.issueKey(identity{accountID: 3, personaID: 30, personaName: "Dropper"})
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- aries.ServeWithOptions(ctx, ln, s.theater, aries.ServeOptions{IdleTimeout: time.Minute})
+	}()
+	defer func() {
+		cancel()
+		ln.Close()
+		<-done
+	}()
+
+	host := dialTheater(t, s, ln.Addr().String(), hostKey)
+	defer host.conn.Close()
+	host.send("CGAM", field("tid", "3"), field("lid", "1"), field("name", "Kick Test"), field("port", "18040"))
+	gid, _ := host.read().Get("GID")
+
+	// Cancel path.
+	a := dialTheater(t, s, ln.Addr().String(), aKey)
+	defer a.conn.Close()
+	pidA := joinApproved(t, host, a, gid)
+	a.send("ECNL", field("tid", "22"), field("gid", gid), field("lid", "1"))
+	if m := a.read(); m.Service != "ECNL" {
+		t.Fatalf("ECNL reply = %s", m.Service)
+	}
+	k := host.read()
+	if k.Service != "KICK" {
+		t.Fatalf("host expected KICK after cancel, got %s", k.Service)
+	}
+	if v, _ := k.Get("PID"); v != pidA {
+		t.Fatalf("KICK PID = %q, want %q", v, pidA)
+	}
+
+	// Disconnect path.
+	b := dialTheater(t, s, ln.Addr().String(), bKey)
+	pidB := joinApproved(t, host, b, gid)
+	b.conn.Close()
+	k = host.read()
+	if k.Service != "KICK" {
+		t.Fatalf("host expected KICK after disconnect, got %s", k.Service)
+	}
+	if v, _ := k.Get("PID"); v != pidB {
+		t.Fatalf("KICK PID = %q, want %q", v, pidB)
+	}
+}
+
+// Players behind one router share a public IP. An anonymous ECHO goes to the
+// connection already seen on that port, else the only one not yet seen, and
+// is otherwise dropped rather than guessed.
+func TestTheaterEchoAttributionSharedIP(t *testing.T) {
+	s := newTestServer(t)
+	h := s.theater
+	c1, c2 := &aries.Client{}, &aries.Client{}
+	anon := fesl.Message{}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.connIP[c1] = "203.0.113.5"
+	h.connIP[c2] = "203.0.113.5"
+
+	if got := h.attributeEcho(anon, "203.0.113.5", 40001); got != nil {
+		t.Fatal("two unseen sessions: attribution should be refused")
+	}
+	h.observed[c1] = addr{"203.0.113.5", 40001}
+	if got := h.attributeEcho(anon, "203.0.113.5", 40001); got != c1 {
+		t.Fatal("known port should refresh its own session")
+	}
+	if got := h.attributeEcho(anon, "203.0.113.5", 40002); got != c2 {
+		t.Fatal("new port should go to the only unseen session")
+	}
+	h.observed[c2] = addr{"203.0.113.5", 40002}
+	if got := h.attributeEcho(anon, "203.0.113.5", 40003); got != nil {
+		t.Fatal("unknown port with every session seen should be refused")
+	}
+	if got := h.attributeEcho(anon, "198.51.100.9", 40001); got != nil {
+		t.Fatal("an IP with no session should not be attributed")
+	}
+}

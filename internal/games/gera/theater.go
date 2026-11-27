@@ -98,6 +98,7 @@ func (h *theater) session(c *aries.Client) *theaterSession {
 
 func (h *theater) Disconnected(c *aries.Client) {
 	var notices []removal
+	var kicks []kick
 	h.mu.Lock()
 	for _, g := range h.games {
 		if g.owner == c {
@@ -105,23 +106,55 @@ func (h *theater) Disconnected(c *aries.Client) {
 			continue
 		}
 		// Drop this connection's membership from any game it had joined.
-		for pid, p := range g.players {
-			if p.writer == c {
-				delete(g.players, pid)
-			}
-		}
-		for pid, p := range g.pending {
-			if p.writer == c {
-				delete(g.pending, pid)
-			}
-		}
+		kicks = append(kicks, h.leaveGame(g, c)...)
 	}
 	delete(h.sessions, c)
 	delete(h.connIP, c)
 	delete(h.observed, c)
 	h.mu.Unlock()
 	sendRemovals(notices)
+	h.sendKicks(kicks, "disconnected")
 	h.srv.opts.Log.Info("theater client disconnected", "conn", c.ID(), "reason", c.CloseReason())
+}
+
+// kick is a KICK notice owed to a host for a guest that left.
+type kick struct {
+	host *aries.Client
+	gid  int
+	pid  int
+}
+
+// leaveGame removes c from a game it joined and returns the KICK notices owed
+// to the host. Only approved guests are reported: the host allocates a player
+// record when it approves a join and keeps that seat reserved until told the
+// guest left, so a guest that cancels or drops without one shrinks the game
+// for good. Pending guests are not reported because the host may never have
+// allocated them. The retail client ignores a KICK for an unknown PID, so a
+// race with the host's own departure report is harmless. Callers hold h.mu.
+func (h *theater) leaveGame(g *hostedGame, c *aries.Client) []kick {
+	var out []kick
+	for pid, p := range g.players {
+		if p.writer == c {
+			delete(g.players, pid)
+			if c != g.owner {
+				out = append(out, kick{host: g.owner, gid: g.gid, pid: pid})
+			}
+		}
+	}
+	for pid, p := range g.pending {
+		if p.writer == c {
+			delete(g.pending, pid)
+		}
+	}
+	return out
+}
+
+func (h *theater) sendKicks(kicks []kick, reason string) {
+	for _, k := range kicks {
+		k.host.Send(fesl.Packet("KICK", msgOK, field("PID", strconv.Itoa(k.pid))))
+		h.srv.opts.Log.Info("theater notified host of departure", "host_conn", k.host.ID(), "gid", k.gid,
+			"pid", k.pid, "reason", reason)
+	}
 }
 
 // removal is a GREM notice owed to a player whose game is gone.
@@ -500,23 +533,16 @@ func (h *theater) cancelJoin(c *aries.Client, m fesl.Message, tid string) {
 	if !ok {
 		return
 	}
+	var kicks []kick
 	h.mu.Lock()
 	if g := h.games[gid]; g != nil {
-		for pid, p := range g.players {
-			if p.writer == c {
-				delete(g.players, pid)
-			}
-		}
-		for pid, p := range g.pending {
-			if p.writer == c {
-				delete(g.pending, pid)
-			}
-		}
+		kicks = h.leaveGame(g, c)
 	}
 	h.mu.Unlock()
 	if tid != "0" {
 		c.Send(fesl.Packet("ECNL", msgOK, field("TID", tid)))
 	}
+	h.sendKicks(kicks, "cancelled")
 }
 
 func (h *theater) playerLeft(c *aries.Client, m fesl.Message, tid string) {
@@ -699,15 +725,21 @@ func (h *theater) handleEcho(conn *net.UDPConn, from netip.AddrPort, data []byte
 	if !validID(tid) {
 		tid = "0"
 	}
-	msgType, _ := m.GetFold("type")
-	if msgType != "0" && msgType != "1" {
+	// TYPE selects the client's AriesUdp handler: 1 is the game browser's
+	// demangler, which learns its public port from the reply. A missing TYPE is
+	// channel 0; any other value is not a request this server understands.
+	msgType, ok := m.GetFold("type")
+	if !ok || msgType == "" {
 		msgType = "0"
+	}
+	if msgType != "0" && msgType != "1" {
+		return
 	}
 	srcIP := from.Addr().String()
 	srcPort := int(from.Port())
 
 	h.mu.Lock()
-	writer := h.attributeEcho(m, srcIP)
+	writer := h.attributeEcho(m, srcIP, srcPort)
 	if writer != nil {
 		h.observed[writer] = addr{srcIP, srcPort}
 	}
@@ -724,9 +756,14 @@ func (h *theater) handleEcho(conn *net.UDPConn, from netip.AddrPort, data []byte
 }
 
 // attributeEcho maps an ECHO datagram to a theater connection: by host secret
-// when present, otherwise to the single connection from the same IP. Callers
-// hold h.mu.
-func (h *theater) attributeEcho(m fesl.Message, srcIP string) *aries.Client {
+// when present, otherwise by source IP. Several players behind one router share
+// a public IP, so an anonymous ECHO then goes to the connection already seen on
+// that source port, or else to the only connection from that IP not yet seen.
+// Anything still ambiguous is dropped: a wrong attribution would hand one
+// player's endpoint to another. The client also learns its own public port
+// from the reply and advertises it in EGAM, so a dropped observation still
+// leaves a usable address. Callers hold h.mu.
+func (h *theater) attributeEcho(m fesl.Message, srcIP string, srcPort int) *aries.Client {
 	gid, hasGID := parseInt(m, "ugid")
 	secret, _ := m.GetFold("secret")
 	if hasGID || secret != "" {
@@ -736,16 +773,33 @@ func (h *theater) attributeEcho(m fesl.Message, srcIP string) *aries.Client {
 		}
 		return g.owner
 	}
-	var match *aries.Client
+	var candidates, samePort, unseen []*aries.Client
 	for conn, ip := range h.connIP {
-		if ip == srcIP {
-			if match != nil {
-				return nil // ambiguous; needs the host-binding path
+		if ip != srcIP {
+			continue
+		}
+		candidates = append(candidates, conn)
+		if e, ok := h.observed[conn]; ok {
+			if e.port == srcPort {
+				samePort = append(samePort, conn)
 			}
-			match = conn
+		} else {
+			unseen = append(unseen, conn)
 		}
 	}
-	return match
+	switch {
+	case len(candidates) == 1:
+		return candidates[0]
+	case len(samePort) == 1:
+		return samePort[0]
+	case len(samePort) == 0 && len(unseen) == 1:
+		return unseen[0]
+	}
+	if len(candidates) > 1 {
+		h.srv.opts.Log.Info("theater UDP observation ambiguous", "source", srcIP+":"+strconv.Itoa(srcPort),
+			"candidates", len(candidates), "same_port", len(samePort), "unseen", len(unseen))
+	}
+	return nil
 }
 
 func playerCounts(g *hostedGame) (active, joining int) {
