@@ -601,6 +601,6 @@ func TestRankStats(t *testing.T) {
 		fesl.Field{Key: "keys.1", Value: "DM_W_PERC"}, fesl.Field{Key: "keys.2", Value: "DM_CUR_L_STRK"})
 	expectField(t, hers, "stats.0.value", "1.0000")
 	expectField(t, hers, "stats.0.rank", "1")
-	expectField(t, hers, "stats.1.value", "50.0000")
+	expectField(t, hers, "stats.1.value", "0.5000")
 	expectField(t, hers, "stats.2.value", "4.0000")
 }

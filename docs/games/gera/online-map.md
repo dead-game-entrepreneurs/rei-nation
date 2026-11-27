@@ -211,7 +211,7 @@ played on 2026-11-26.
   The screens read `<MODE>_RANK`, `<MODE>_W_PERC` and `<MODE>_K` (modes seen:
   `DM`, `TOW`, `D`, `CD`, `TD`) but the game reports only totals such as
   `DM_W`, `DM_T_G`, `DM_K`, `DM_DTHS` and `DM_CUM_PLACE`. The server derives
-  `<MODE>_W_PERC` as 100 times wins over games and `<MODE>_RANK` as the win
+  `<MODE>_W_PERC` as wins over games (0 to 1; the leaderboard shows it times 100) and `<MODE>_RANK` as the win
   count; the original formula is unknown.
   `GetStats` and `GetRankedStats` return each requested key with its
   competition rank (highest first, 0 when the persona has no value);

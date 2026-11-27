@@ -119,7 +119,7 @@ func (s *server) updateStats(ctx context.Context, c *aries.Client, m fesl.Messag
 			key, _ := m.Get(sp + ".k")
 			value, _ := m.Get(sp + ".v")
 			ut, _ := intField(m, sp+".ut", -1, 0, 255)
-			logged = append(logged, key+"/"+strconv.Itoa(ut))
+			logged = append(logged, key+"/"+strconv.Itoa(ut)+"="+value)
 			if !statKey.MatchString(key) || !statValue.MatchString(value) || (ut != updateAdd && ut != updateSet && ut != updateReplace) {
 				s.opts.Log.Info("rank update skipped stat", "conn", c.ID(), "key", key, "update_type", ut)
 				continue
@@ -154,8 +154,8 @@ func (s *server) updateStats(ctx context.Context, c *aries.Client, m fesl.Messag
 
 // deriveStats keeps the stats the client reads but never reports. For each
 // mode prefix P with reported wins (P_W) or games (P_T_G), P_W_PERC is the
-// win percentage (0 to 100) and P_RANK, which orders the leaderboards, is the
-// win count. The original service's ranking formula is unknown.
+// win fraction from 0 to 1 (the leaderboard shows it times 100) and P_RANK,
+// which orders the leaderboards, is the win count. The original service's ranking formula is unknown.
 func (s *server) deriveStats(ctx context.Context, owner int64, updates []storage.StatUpdate) error {
 	prefixes := map[string]bool{}
 	for _, u := range updates {
@@ -175,7 +175,7 @@ func (s *server) deriveStats(ctx context.Context, owner int64, updates []storage
 		games, _ := strconv.ParseFloat(values[1].Value, 64)
 		perc := 0.0
 		if games > 0 {
-			perc = min(100, 100*wins/games)
+			perc = min(1, wins/games)
 		}
 		derived = append(derived,
 			storage.StatUpdate{Key: p + "_W_PERC", Value: strconv.FormatFloat(perc, 'f', 4, 64)},
