@@ -68,8 +68,14 @@ func (s *server) handleAcct(ctx context.Context, c *aries.Client, m fesl.Message
 		a := s.session(c)
 		*a = account{}
 		c.Send(fesl.Reply(m, m.TXN))
+	case "getaccount":
+		s.getAccount(ctx, c, m)
+	case "updateaccount", "updatepassword":
+		s.updateAccount(ctx, c, m)
 	default:
-		s.opts.Log.Info("unhandled acct transaction", "conn", c.ID(), "txn", m.TXN)
+		// Answer so a screen does not wait on the request.
+		s.opts.Log.Info("unhandled acct transaction", "conn", c.ID(), "txn", m.TXN, "fields", requestFieldNames(m))
+		s.acctError(c, m, errMissingField)
 	}
 }
 
@@ -136,6 +142,7 @@ func (s *server) addAccount(ctx context.Context, c *aries.Client, m fesl.Message
 		s.acctError(c, m, errServer)
 	default:
 		s.opts.Log.Info("account created", "conn", c.ID(), "name", name)
+		s.saveRegistration(ctx, name, m)
 		c.Send(fesl.Reply(m, m.TXN))
 	}
 }

@@ -108,6 +108,9 @@ func (p *Postgres) initialize(ctx context.Context) error {
 				PRIMARY KEY (title,race_id), FOREIGN KEY (title,race_id) REFERENCES eanation.race_receipts(title,race_id)
 			)`,
 			"CREATE INDEX IF NOT EXISTS race_details_track ON eanation.race_details (title,track_id) WHERE track_id IS NOT NULL",
+			`CREATE TABLE IF NOT EXISTS eanation.account_profile (
+				account_id bigint PRIMARY KEY REFERENCES eanation.accounts(id), details jsonb NOT NULL
+			)`,
 			`CREATE TABLE IF NOT EXISTS eanation.player_stats (
 				title text NOT NULL, persona_id integer NOT NULL REFERENCES eanation.personas(id),
 				stat_key text NOT NULL, value numeric(28,4) NOT NULL, text text NOT NULL DEFAULT '',

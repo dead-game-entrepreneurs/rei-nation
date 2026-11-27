@@ -144,3 +144,29 @@ func TestPlayerStats(t *testing.T) {
 		t.Fatalf("extra = %+v / %+v", board[0].Extra, board[1].Extra)
 	}
 }
+
+func TestAccountProfile(t *testing.T) {
+	p, suffix := openTest(t)
+	ctx := context.Background()
+	testPersonas(t, p, suffix)
+	acct, _, err := p.Account(ctx, "acct"+suffix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, err := p.AccountProfile(ctx, acct.ID); err != nil || len(d) != 0 {
+		t.Fatalf("empty profile = %v, %v", d, err)
+	}
+	if err := p.UpdateAccountProfile(ctx, acct.ID, "", map[string]string{"DOBDay": "1", "eaMailFlag": "1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.UpdateAccountProfile(ctx, acct.ID, suffix+"@example.com", map[string]string{"eaMailFlag": "0"}); err != nil {
+		t.Fatal(err)
+	}
+	d, err := p.AccountProfile(ctx, acct.ID)
+	if err != nil || d["DOBDay"] != "1" || d["eaMailFlag"] != "0" {
+		t.Fatalf("profile = %v, %v", d, err)
+	}
+	if a, _, _ := p.Account(ctx, "acct"+suffix); a.Mail != suffix+"@example.com" {
+		t.Fatalf("mail = %q", a.Mail)
+	}
+}

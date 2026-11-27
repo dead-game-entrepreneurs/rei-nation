@@ -151,8 +151,8 @@ Treat this as a test service.
   cannot both serve it from one process as things stand.
 - Stats, leaderboards and buddy lists are stored but have only synthetic
   tests so far. Players report their own stats, so leaderboards can be
-  faked by a modified client. The account screen (`acct GetAccount`) is not
-  answered.
+  faked by a modified client. The account screen (`acct GetAccount` and
+  `UpdateAccount`) has synthetic tests only.
 - After a match without map rotation the host returns to the online menu and
   the joiner sees "Your connection to the game session has been lost". The
   joiner raises this itself when its session with the host is gone at the

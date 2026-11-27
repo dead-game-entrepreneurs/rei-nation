@@ -221,5 +221,13 @@ played on 2026-11-26.
   them, still needs a live match; each report is logged with its keys and
   update types. `GetDateRange` gets an error reply so the screen does not wait
   out its timeout.
-- Static: `acct GetAccount` backs the account screen. Not implemented.
+- `acct GetAccount` backs Account Options (seen live 2026-11-26; it was
+  unanswered, so the screen waited). `accountinfo.go` answers with `name`,
+  `email`, `countryCode`, `countryDesc`, `userId`, `DOBDay`, `DOBMonth`,
+  `DOBYear`, `eaMailFlag`, `thirdPartyMailFlag` and `parentalEmail`, the
+  account field names in the client's string table; the exact set the screen
+  reads is not traced yet. `UpdateAccount` and `UpdatePassword` save email,
+  those details, and a new password (`newPassword`) when `password` matches.
+  Both log their request field names. Unknown `acct` transactions now get an
+  error reply instead of none.
 - Static: EA voice chat through `VOIPF.IRX`.
