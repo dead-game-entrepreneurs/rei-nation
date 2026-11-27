@@ -3,6 +3,7 @@ language: en-US
 
 reviews:
   profile: assertive
+  enable_prompt_for_ai_agents: false
   auto_review:
     enabled: true
     auto_incremental_review: true
@@ -10,6 +11,11 @@ reviews:
   auto_approvals:
     enabled: false
   path_instructions:
+    - path: "{**,.*,**/.*/**}"
+      instructions: |
+        Keep each inline finding to at most two short lines. State the issue
+        and its impact on the first line, then the fix or missing evidence on
+        the second. Omit greetings, repeated context, and code blocks.
     - path: "**/*.go"
       instructions: |
         Follow AGENTS.md and check the ordinary entry point. Flag concrete
@@ -30,7 +36,11 @@ reviews:
     - path: "{cmd/**,internal/{app,game,connectivity,protocol,games}/**,configs/**,compose.yaml,.env.example,README.md,docs/games/**}"
       instructions: |
         For new title support or changes that affect peer connectivity, check
-        the actual client handoff and report the relay options it supports.
+        the actual client handoff. Prefer adaptive relay for Internet play.
+        Preserve working direct play and use a relay when the stock client
+        detects a failed direct connection. If the client lacks usable fallback,
+        expect a forced relay route for Internet play. If even forced relay is
+        infeasible, ask for the client limitation and mark Internet support limited.
         Distinguish direct play, relay selected before handoff, client-driven
         fallback within an attempt, and a fresh attempt routed through a relay.
         A relay listener, a successful probe, or a mode named auto establishes
@@ -39,10 +49,8 @@ reviews:
         client code, or focused tests. Check both a working direct path and a
         blocked-direct test with the relay reachable when fallback is claimed.
         Flag unsupported or unverified outcomes in status claims.
-        When the stock client lacks fallback, identify feasible routes such
-        as an initial relay handoff and explain the client limitation.
         For forwarding changes, check admitted peers, expected source and
-        destination ports, same-IP behavior, expiry, and failure cleanup.
+        destination ports, shared public IPs and CGNAT, expiry, and failure cleanup.
     - path: "{.env.example,compose.yaml,Dockerfile,configs/**,.github/workflows/**,scripts/**}"
       instructions: |
         Check that changed settings agree across code, Compose, and the README.
@@ -56,14 +64,18 @@ reviews:
         instructions: |
           Apply this check when the PR adds a title or changes the peer handoff,
           NAT traversal, or relay behavior. Pass other changes as not applicable.
-          For an applicable PR, pass if its description or changed title notes
-          identify the supported modes and report evidence or explicitly mark
-          unknown or untested behavior. If it claims adaptive relay, require
-          evidence of how the stock client selects an alternate after direct
-          failure in the same attempt, and a reported outcome for direct and
-          blocked-direct cases or an explicit pending test status. Fail if the
-          relay assessment is missing or if the status claims support beyond
-          the evidence. Name the title and the missing evidence.
+          For an applicable PR, look for a relay assessment in its description
+          or changed title notes. Pass when it documents a supported adaptive
+          route with evidence of how the stock client switches after direct
+          failure, or explains why fallback is unavailable and documents how
+          to enable forced relay for Internet play. If forced relay is also
+          infeasible, require the client limitation and a limited Internet play
+          status. Treat unproven feasibility as open and state what test is
+          pending. Require direct and blocked-direct outcomes or explicit
+          pending test status for adaptive claims. Fail if the assessment is
+          missing, a supported forced route is omitted when fallback is
+          unavailable, or the claims exceed the evidence. Name the title and
+          the missing route or evidence in at most two short lines.
   tools:
     golangci-lint:
       enabled: true

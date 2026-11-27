@@ -32,6 +32,11 @@ a mechanism across repos. For example, NASCAR 04 selects one peer endpoint befor
 the race, so its relay decision belongs in the NASCAR adapter. Record the source
 and preserve applicable notices when adapting code from another project.
 
+Prefer adaptive relay for Internet play when the stock client can switch after
+a direct failure. If the client lacks that path, provide a forced relay option
+for Internet play and document how to enable it. Explain client limitations
+that rule out either approach and identify which routes have been verified.
+
 ## Work from client evidence
 
 1. Identify the title, region, disc revision, and menu action. Trace the ordinary

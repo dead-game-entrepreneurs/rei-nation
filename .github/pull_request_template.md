@@ -9,8 +9,8 @@ physical-console checks and any behavior still awaiting a test. -->
 
 ## Peer connectivity
 
-<!-- For a new title or a change to peer setup, NAT traversal, or relay, name
-the supported modes and what happens if direct traffic fails. Include the
-client command or endpoint field, a trace or test, and any unverified cases.
-Distinguish preselected relay, same-attempt fallback, and a fresh relayed
-attempt. For unrelated changes, write N/A. -->
+<!-- For a new title or a peer networking change, describe adaptive relay and
+show how the stock client falls back when direct fails. If it cannot fall
+back, describe how to force relay for Internet play. State any client limit,
+include test or trace evidence, and mark unverified cases. For unrelated
+changes, write N/A. -->
