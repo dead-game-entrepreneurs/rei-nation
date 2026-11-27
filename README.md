@@ -226,7 +226,6 @@ Title adapters live under `internal/games`. `internal/protocol/aries` handles wi
 - [mohh-master-server contributors](https://github.com/a-blondel/mohh-master-server) developed the predecessor to EA Nation Server.
 - [riperiperi and Breakin-In contributors](https://github.com/riperiperi/Breakin-In) published the Apache-2.0 server for The Sims: Bustin' Out (PS2). Rei Nation's initial Go adapter targets NASCAR Thunder 2004.
 - [Quetzal contributors](https://github.com/dead-game-entrepreneurs/quetzal) provided the reference for the Docker and DNS setup.
-- [The original TSFP server](https://github.com/princebyyourlogic/tsfp-server-recreation/tree/1de3a50c04a5a3389f927db7ca63a4833771605d) provided the PS2 service implementation and client research used for the Go adapter.
 
 ## License
 
