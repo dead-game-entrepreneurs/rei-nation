@@ -43,7 +43,7 @@
 | Physical consoles, other disc regions and Internet NAT combinations | 🧪 awaiting wider testing |
 | Relay for EA SPORTS Talk | Unimplemented |
 
-**GoldenEye: Rogue Agent** (US PS2, `SLUS-21064`) has an early `gera` adapter. It negotiates the SSL 2.0 handshake the client expects, then frames FESL messages and answers `fsys` Hello on TCP 18040. It has not been tested in game yet, and accounts, the game browser and Messenger are not implemented. See the [GoldenEye notes](docs/games/gera/online-map.md).
+**GoldenEye: Rogue Agent** (US PS2, `SLUS-21064`) has a `gera` adapter that uses EA FESL. Two PCSX2 machines on one LAN have signed in, registered accounts and personas, come online in the messenger, hosted, joined and played a full match. Play between different networks, stats, buddy lists and voice chat are not done yet. See the [GoldenEye notes](docs/games/gera/online-map.md) and [Internet play](docs/games/gera/internet-play.md).
 
 The client owns race simulation. The server handles accounts, rooms, Messenger, peer setup, and ranked statistics. Message history is restored after the client loads its buddy and ignore lists. The game can display restored messages as unread again.
 
