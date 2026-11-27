@@ -56,6 +56,7 @@ func (m *messenger) Handle(ctx context.Context, c *aries.Client, in aries.Frame)
 			if s == nil {
 				m.clients[c] = &buddySession{persona: p}
 			}
+			c.ClearInitialReadDeadline()
 			m.mu.Unlock()
 			reply("", "USER", p.Name, "TITL", "", "TIID", "0")
 			return
@@ -114,8 +115,7 @@ func (m *messenger) Handle(ctx context.Context, c *aries.Client, in aries.Frame)
 		}
 	case "RADD", "RDEL":
 		if strings.EqualFold(f["LIST"], "I") {
-			m.block(ctx, persona, f["USER"], tag)
-			reply("")
+			reply(m.block(ctx, persona, f["USER"], tag))
 		} else if tag == "RDEL" {
 			reply(m.friend(ctx, persona, f, tag))
 		}
@@ -193,13 +193,13 @@ func (m *messenger) flush(ctx context.Context, name string) {
 	run := &mailDelivery{}
 	m.delivery[p.Name] = run
 	m.mu.Unlock()
-	deliveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	go func() {
-		defer cancel()
 		for {
+			deliveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			m.deliver(deliveryCtx, p)
+			cancel()
 			m.mu.Lock()
-			if !run.requested || deliveryCtx.Err() != nil {
+			if !run.requested {
 				delete(m.delivery, p.Name)
 				m.mu.Unlock()
 				return
@@ -364,12 +364,12 @@ func (m *messenger) friend(ctx context.Context, self storage.Persona, f map[stri
 	return ""
 }
 
-func (m *messenger) block(ctx context.Context, self storage.Persona, name, tag string) {
+func (m *messenger) block(ctx context.Context, self storage.Persona, name, tag string) string {
 	m.friendMu.Lock()
 	defer m.friendMu.Unlock()
 	other, ok := m.target(ctx, name)
-	if !ok {
-		return
+	if !ok || self.ID == other.ID {
+		return "user"
 	}
 	operation := "unblock"
 	if tag == "RADD" {
@@ -384,9 +384,14 @@ func (m *messenger) block(ctx context.Context, self storage.Persona, name, tag s
 			}
 		}
 	}
-	if changed, _ := m.store.ChangeBuddy(ctx, gameKey, self.Name, other.Name, operation); changed && before != "" {
+	changed, err := m.store.ChangeBuddy(ctx, gameKey, self.Name, other.Name, operation)
+	if err != nil || !changed {
+		return "user"
+	}
+	if before != "" {
 		m.notifyFriend(self, other, before, "")
 	}
+	return ""
 }
 
 func (m *messenger) notifyFriend(self, other storage.Persona, before, after string) {

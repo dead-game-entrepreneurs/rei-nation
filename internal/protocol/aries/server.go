@@ -17,11 +17,12 @@ type Handler interface {
 }
 
 type Client struct {
-	conn net.Conn
-	out  chan outgoing
-	done chan struct{}
-	once sync.Once
-	id   uint64
+	conn                net.Conn
+	out                 chan outgoing
+	done                chan struct{}
+	once                sync.Once
+	id                  uint64
+	initialReadDeadline atomic.Int64
 	// Written before done closes and read only after observing its closure.
 	closeReason string
 }
@@ -38,6 +39,9 @@ func (c *Client) Addr() netip.Addr {
 }
 
 func (c *Client) ID() uint64 { return c.id }
+
+// ClearInitialReadDeadline lets an authenticated connection use the transport's normal timeout.
+func (c *Client) ClearInitialReadDeadline() { c.initialReadDeadline.Store(0) }
 
 // Send queues in order without letting a slow client hold up a title runtime.
 func (c *Client) Send(f Frame) {
@@ -94,10 +98,11 @@ func ServeWithHeartbeat(ctx context.Context, ln net.Listener, handler Handler, t
 }
 
 type Transport struct {
-	Upgrade           func(net.Conn) (net.Conn, error)
-	Heartbeat         Frame
-	HeartbeatInterval time.Duration
-	ReadTimeout       time.Duration
+	Upgrade            func(net.Conn) (net.Conn, error)
+	Heartbeat          Frame
+	HeartbeatInterval  time.Duration
+	ReadTimeout        time.Duration
+	InitialReadTimeout time.Duration
 }
 
 func ServeTransport(ctx context.Context, ln net.Listener, handler Handler, transport Transport) error {
@@ -147,6 +152,9 @@ func ServeTransport(ctx context.Context, ln net.Listener, handler Handler, trans
 
 func serveClient(ctx context.Context, conn net.Conn, h Handler, transport Transport) {
 	c := &Client{conn: conn, out: make(chan outgoing, 256), done: make(chan struct{}), id: nextClientID.Add(1)}
+	if transport.InitialReadTimeout > 0 {
+		c.initialReadDeadline.Store(time.Now().Add(transport.InitialReadTimeout).UnixNano())
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(ctx, func() { c.CloseWithReason("server shutdown") })
 	writerDone := make(chan struct{})
@@ -189,6 +197,12 @@ func serveClient(ctx context.Context, conn net.Conn, h Handler, transport Transp
 		var deadline time.Time
 		if transport.ReadTimeout > 0 {
 			deadline = time.Now().Add(transport.ReadTimeout)
+		}
+		if initial := c.initialReadDeadline.Load(); initial > 0 {
+			initialDeadline := time.Unix(0, initial)
+			if deadline.IsZero() || initialDeadline.Before(deadline) {
+				deadline = initialDeadline
+			}
 		}
 		if conn.SetReadDeadline(deadline) != nil {
 			c.CloseWithReason("could not set read deadline")

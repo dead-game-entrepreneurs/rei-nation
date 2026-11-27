@@ -85,8 +85,12 @@ def main():
         content = bytes(row["content"])
         metadata = json.loads(row["metadata"])
         name_key = " ".join(str(metadata["name"]).split()).casefold()
-        if name_key in seen_map_names:
-            name_key = f"{name_key}#legacy-{row['id']}"
+        candidate = name_key
+        suffix = 0
+        while candidate in seen_map_names:
+            suffix += 1
+            candidate = f"{name_key}#legacy-{row['id']}-{suffix}"
+        name_key = candidate
         seen_map_names.add(name_key)
         rating_sum = round(float(row["rating"]) * int(row["review_count"]))
         print(

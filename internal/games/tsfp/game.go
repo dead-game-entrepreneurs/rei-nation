@@ -80,7 +80,8 @@ func (f *fesl) Services() []func(context.Context) error {
 		},
 		func(ctx context.Context) error {
 			ln := f.opts.AuxTCP[messengerPort]
-			return aries.ServeTransport(ctx, keepaliveListener{ln}, f.messenger, aries.Transport{})
+			return aries.ServeTransport(ctx, keepaliveListener{ln}, f.messenger,
+				aries.Transport{InitialReadTimeout: 20 * time.Second})
 		},
 		func(ctx context.Context) error { return f.theater.sweep(ctx, f.opts.UDP[theaterPort]) },
 	}
@@ -108,6 +109,9 @@ type loginKeys struct {
 	keys map[string]sessionKey
 }
 
+const maxLoginKeys = 4096
+const maxPersonaLoginKeys = 4
+
 func (k *loginKeys) issue(p storage.Persona) string {
 	// Account-level keys have no authority to enter Theater or Messenger.
 	key := token(24)
@@ -117,10 +121,32 @@ func (k *loginKeys) issue(p storage.Persona) string {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	now := time.Now()
+	var oldestID string
+	var oldest time.Time
+	personaKeys := 0
 	for id, entry := range k.keys {
 		if !now.Before(entry.expires) {
 			delete(k.keys, id)
+			continue
 		}
+		if entry.persona.ID == p.ID {
+			personaKeys++
+			if oldestID == "" || entry.expires.Before(oldest) {
+				oldestID, oldest = id, entry.expires
+			}
+		}
+	}
+	if personaKeys >= maxPersonaLoginKeys {
+		delete(k.keys, oldestID)
+	}
+	if len(k.keys) >= maxLoginKeys {
+		oldestID = ""
+		for id, entry := range k.keys {
+			if oldestID == "" || entry.expires.Before(oldest) {
+				oldestID, oldest = id, entry.expires
+			}
+		}
+		delete(k.keys, oldestID)
 	}
 	k.keys[key] = sessionKey{p, now.Add(24 * time.Hour)}
 	return key
@@ -133,5 +159,9 @@ func (k *loginKeys) lookup(key string) (storage.Persona, bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	entry, ok := k.keys[key]
-	return entry.persona, ok && time.Now().Before(entry.expires)
+	if ok && !time.Now().Before(entry.expires) {
+		delete(k.keys, key)
+		ok = false
+	}
+	return entry.persona, ok
 }

@@ -135,11 +135,11 @@ Set `REI_NATION_RELAY` in `.env` to choose the route before matchmaking hands of
 
 | Value | Behavior |
 | --- | --- |
-| `auto` | Uses direct play on a LAN and selects the relay for two distinct public addresses when a mapping is available. |
-| `always` | Prefers the relay when both drivers have distinct source IPv4 addresses, including on a LAN. |
+| `auto` | Uses direct play until the host's public mapping is verified, then selects the relay for distinct public addresses. |
+| `always` | Prefers the relay when both peers have distinct source IPv4 addresses, including on a LAN. |
 | `off` | Uses direct play. |
 
-Each source IP can belong to one active relay pair. If both consoles share an address or a route is already in use, the server offers direct play. The stock client accepts one endpoint per attempt and has no automatic relay retry. The relay covers race traffic. EA SPORTS Talk uses UDP `6000` directly between peers.
+For TSFP, relay members are pinned to the UDP address observed during matchmaking; packets from another source port are rejected. If both consoles share an address, the server offers direct play. The stock client accepts one endpoint per attempt and has no automatic relay retry. NASCAR race traffic uses the relay independently; EA SPORTS Talk uses UDP `6000` directly between peers.
 
 ### Messenger and account recovery
 
@@ -155,10 +155,13 @@ the original `accounts.sqlite3`, initialize an empty Rei Nation database, stop
 the Rei Nation process while importing, and run:
 
 ```sh
+set -e
 docker compose up -d --build --wait
 docker compose stop rei-nation
-python3 scripts/migrate-tsfp-sqlite.py /path/to/accounts.sqlite3 \
-  | docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U eanation -d eanation
+import_sql="$(mktemp)"
+trap 'rm -f "$import_sql"' EXIT
+python3 scripts/migrate-tsfp-sqlite.py /path/to/accounts.sqlite3 > "$import_sql"
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U eanation -d eanation < "$import_sql"
 docker compose start rei-nation
 ```
 

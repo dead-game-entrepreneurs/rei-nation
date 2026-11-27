@@ -13,11 +13,13 @@ import (
 
 const legacyPasswordPrefix = "tsfp-pbkdf2-sha256$"
 
-// verifyPassword accepts both Rei Nation bcrypt hashes and the original TSFP
-// server's PBKDF2-SHA256 hashes. Legacy hashes include their binary salt in the
-// encoded database value so migrated accounts keep their existing passwords.
+// verifyPassword accepts Rei Nation bcrypt hashes and migrated PBKDF2-SHA256 hashes.
+// Migrated hashes retain the original binary salt so existing passwords keep working.
 func verifyPassword(stored, password string) bool {
 	if !strings.HasPrefix(stored, legacyPasswordPrefix) {
+		if len(password) > 72 {
+			return false
+		}
 		return bcrypt.CompareHashAndPassword([]byte(stored), []byte(password)) == nil
 	}
 	parts := strings.Split(stored, "$")

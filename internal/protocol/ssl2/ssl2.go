@@ -9,6 +9,7 @@ import (
 	"crypto/rsa"
 	"crypto/subtle"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/binary"
 	"encoding/pem"
 	"errors"
@@ -61,7 +62,60 @@ func Load(certFile, keyFile string) (*Server, error) {
 	if key == nil {
 		return nil, errors.New("SSLv2 requires an RSA key and a certificate that fits one record")
 	}
+	public, err := certificateRSAKey(certBlock.Bytes)
+	if err != nil || key.Validate() != nil || public.E != key.PublicKey.E || public.N.Cmp(key.PublicKey.N) != 0 {
+		return nil, errors.New("SSLv2 certificate and private key do not match")
+	}
 	return &Server{cert: certBlock.Bytes, key: key}, nil
+}
+
+func certificateRSAKey(der []byte) (*rsa.PublicKey, error) {
+	var outer asn1.RawValue
+	rest, err := asn1.Unmarshal(der, &outer)
+	if err != nil || len(rest) != 0 || outer.Tag != asn1.TagSequence {
+		return nil, errors.New("invalid certificate")
+	}
+	var tbs asn1.RawValue
+	if _, err = asn1.Unmarshal(outer.Bytes, &tbs); err != nil || tbs.Tag != asn1.TagSequence {
+		return nil, errors.New("invalid certificate body")
+	}
+	fields := tbs.Bytes
+	var field asn1.RawValue
+	fields, err = unmarshalASN1(fields, &field)
+	if err != nil {
+		return nil, err
+	}
+	if field.Class == asn1.ClassContextSpecific && field.Tag == 0 {
+		fields, err = unmarshalASN1(fields, &field)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// Serial number is already consumed; skip signature, issuer, validity, and subject.
+	for range 4 {
+		fields, err = unmarshalASN1(fields, &field)
+		if err != nil {
+			return nil, err
+		}
+	}
+	fields, err = unmarshalASN1(fields, &field)
+	if err != nil || field.Tag != asn1.TagSequence {
+		return nil, errors.New("certificate has no public key")
+	}
+	parsed, err := x509.ParsePKIXPublicKey(field.FullBytes)
+	if err != nil {
+		return nil, err
+	}
+	public, ok := parsed.(*rsa.PublicKey)
+	if !ok {
+		return nil, errors.New("SSLv2 requires an RSA certificate")
+	}
+	return public, nil
+}
+
+func unmarshalASN1(data []byte, value *asn1.RawValue) ([]byte, error) {
+	rest, err := asn1.Unmarshal(data, value)
+	return rest, err
 }
 
 func (s *Server) Accept(raw net.Conn) (net.Conn, error) {

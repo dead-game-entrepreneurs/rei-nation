@@ -19,7 +19,6 @@ type relayRoute uint8
 const (
 	direct relayRoute = iota
 	forcedRelay
-	fallbackRelay
 )
 
 type relayRoom struct {
@@ -31,23 +30,28 @@ type relayRoom struct {
 type relayMember struct {
 	socket   *net.UDPConn
 	endpoint netip.AddrPort
-	heard    bool
 	budget   float64
 	last     time.Time
 	closed   bool
 }
 
-func (t *theater) joinRelay(g *match, pid int, personaID int64, endpoint netip.AddrPort) (netip.AddrPort, relayRoute) {
+func relayRouteFor(mode string, available, reachable bool, host, guest netip.Addr) relayRoute {
+	if !available || host == guest {
+		return direct
+	}
+	if mode == "always" || mode == "auto" && reachable {
+		return forcedRelay
+	}
+	return direct
+}
+
+func (t *theater) joinRelay(g *match, pid int, endpoint netip.AddrPort) (netip.AddrPort, relayRoute) {
 	if !t.relayIP.IsValid() || t.relayMode == "off" {
 		return endpoint, direct
 	}
-	route := direct
-	switch {
-	case t.relayMode == "always", time.Now().Before(t.failedUntil[personaID]):
-		route = forcedRelay
-	case g.relayReachable && endpoint.Addr() != g.external.Addr():
-		route = fallbackRelay
-	case g.relay == nil:
+	host := t.endpoint(g.owner, g.external).Addr()
+	route := relayRouteFor(t.relayMode, true, g.relayReachable, host, endpoint.Addr())
+	if route == direct {
 		return endpoint, direct
 	}
 	room := g.relay
@@ -74,10 +78,7 @@ func (t *theater) joinRelay(g *match, pid int, personaID int64, endpoint netip.A
 		return endpoint, direct
 	}
 	g.relay = room
-	if route == forcedRelay {
-		return room.address(pid), route
-	}
-	return endpoint, route
+	return room.address(pid), route
 }
 
 func (r *relayRoom) add(pid int, endpoint netip.AddrPort) error {
@@ -221,29 +222,16 @@ func (r *relayRoom) forward(target *relayMember, from netip.AddrPort, data []byt
 	if target.closed {
 		return
 	}
-	var exact, unseen, candidate *relayMember
-	var exactCount, unseenCount, candidates int
+	var sender *relayMember
 	for _, p := range r.members {
-		if p == target || p.endpoint.Addr() != from.Addr() {
-			continue
-		}
-		candidate, candidates = p, candidates+1
-		if p.endpoint == from {
-			exact, exactCount = p, exactCount+1
-		}
-		if !p.heard {
-			unseen, unseenCount = p, unseenCount+1
+		if p != target && p.endpoint == from {
+			if sender != nil {
+				return
+			}
+			sender = p
 		}
 	}
-	var sender *relayMember
-	switch {
-	case exactCount == 1:
-		sender = exact
-	case exactCount == 0 && candidates == 1:
-		sender = candidate
-	case exactCount == 0 && unseenCount == 1:
-		sender = unseen
-	default:
+	if sender == nil {
 		return
 	}
 	now := time.Now()
@@ -253,6 +241,5 @@ func (r *relayRoom) forward(target *relayMember, from netip.AddrPort, data []byt
 		return
 	}
 	sender.budget -= float64(len(data))
-	sender.endpoint, sender.heard = from, true
 	_, _ = sender.socket.WriteToUDPAddrPort(data, target.endpoint)
 }

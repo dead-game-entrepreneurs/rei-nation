@@ -8,12 +8,12 @@ import (
 	"math"
 	"path"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/storage"
+	"golang.org/x/text/cases"
 )
 
 const maxMapSize = 0x800a
@@ -21,6 +21,11 @@ const maxRecordID = 2147483647
 const mapDateFormat = "01/02/2006"
 
 var mapAttribute = regexp.MustCompile("^[A-Za-z0-9_-]{1,27}$")
+var mapNameFold = cases.Fold()
+
+func mapNameKey(name string) string {
+	return mapNameFold.String(strings.Join(strings.Fields(name), " "))
+}
 
 func (f *fesl) mapTransaction(ctx context.Context, s *feslSession, tag, command string, v map[string]string) []string {
 	if s.persona.ID == 0 {
@@ -51,11 +56,22 @@ func (f *fesl) mapTransaction(ctx context.Context, s *feslSession, tag, command 
 		if err != nil {
 			return failure("21")
 		}
-		rows, err := f.content.TSFPMaps(ctx)
+		order := filter.order
+		if order == "listblobinfo" && filter.name != "" {
+			order = "listblobinfo-name"
+		}
+		if filter.limit == 0 {
+			return mapPage(s, 32)
+		}
+		err = f.content.TSFPMaps(ctx, order, func(m storage.TSFPMap) bool {
+			if filter.matches(m) {
+				s.maps = append(s.maps, m)
+			}
+			return len(s.maps) < filter.limit
+		})
 		if err != nil {
 			return failure("99")
 		}
-		s.maps = filter.apply(rows)
 		return mapPage(s, 32)
 	}
 	id, ok := decimal(v["BLOBID"], maxRecordID)
@@ -111,7 +127,7 @@ func (f *fesl) upload(ctx context.Context, p storage.Persona, v map[string]strin
 		ShortDescription: short(v["SHORTDESCRIPTION"], 79), LongDescription: short(v["LONGDESCRIPTION"], 254),
 		Locale: short(v["LOCALE"], 31), FormatType: fallback(v, "FORMATTYPE", "0"), IconID: fallback(v, "ICONID", "0"),
 	}
-	nameKey := strings.ToLower(strings.Join(strings.Fields(meta.Name), " "))
+	nameKey := mapNameKey(meta.Name)
 	attrs, valid := mapAttributes(v, "ATTRIBUTES")
 	_, formatOK := decimal(meta.FormatType, maxRecordID)
 	_, iconOK := decimal(meta.IconID, maxRecordID)
@@ -194,7 +210,7 @@ func newMapFilter(command string, v map[string]string, now time.Time) (mapFilter
 	f := mapFilter{numbers: make(map[string]float64), limit: 2000, order: command, name: v["NAME"],
 		caseSensitive: v["NAMECASESENSITIVE"] == "1", wildcard: v["NAMEWILDCARDMATCH"] == "1"}
 	if !f.caseSensitive {
-		f.name = strings.ToLower(f.name)
+		f.name = mapNameFold.String(f.name)
 	}
 	if f.wildcard {
 		if _, err := path.Match(f.name, ""); err != nil {
@@ -263,34 +279,6 @@ func newMapFilter(command string, v map[string]string, now time.Time) (mapFilter
 	return f, nil
 }
 
-func (f mapFilter) apply(rows []storage.TSFPMap) []storage.TSFPMap {
-	result := rows[:0]
-	for _, m := range rows {
-		if f.matches(m) {
-			result = append(result, m)
-		}
-	}
-	sort.Slice(result, func(i, j int) bool {
-		a, b := result[i], result[j]
-		switch f.order {
-		case "topnblobdownloads":
-			if a.Downloads != b.Downloads {
-				return a.Downloads > b.Downloads
-			}
-		case "topnblobratings":
-			if a.Rating != b.Rating {
-				return a.Rating > b.Rating
-			}
-		default:
-			if f.name != "" && !strings.EqualFold(a.Meta.Name, b.Meta.Name) {
-				return strings.ToLower(a.Meta.Name) < strings.ToLower(b.Meta.Name)
-			}
-		}
-		return a.ID > b.ID
-	})
-	return append([]storage.TSFPMap(nil), result[:min(f.limit, len(result))]...)
-}
-
 func (f mapFilter) matches(m storage.TSFPMap) bool {
 	if (!f.start.IsZero() && m.Created.Before(f.start)) || (!f.end.IsZero() && !m.Created.Before(f.end)) {
 		return false
@@ -313,7 +301,7 @@ func (f mapFilter) matches(m storage.TSFPMap) bool {
 	if f.name != "" {
 		name := m.Meta.Name
 		if !f.caseSensitive {
-			name = strings.ToLower(name)
+			name = mapNameFold.String(name)
 		}
 		match := name == f.name
 		if f.wildcard {
@@ -354,7 +342,10 @@ func (f *fesl) feedback(ctx context.Context, p storage.Persona, v map[string]str
 			targetID = target.ID
 		}
 	} else if v["TARGETIDS.[]"] == "1" {
-		id, _ := decimal(v["TARGETIDS.0"], maxRecordID)
+		id, valid := decimal(v["TARGETIDS.0"], maxRecordID)
+		if !valid {
+			return failure("21")
+		}
 		targetID = int64(id)
 	}
 	if targetID == 0 {

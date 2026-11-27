@@ -55,6 +55,72 @@ func TestFESLFragments(t *testing.T) {
 	}
 }
 
+func TestRankFragmentBudget(t *testing.T) {
+	pairs := []string{"stats.[]", "16"}
+	for i := range 16 {
+		for j := range 24 {
+			prefix := "stats." + strconv.Itoa(i) + ".addStats." + strconv.Itoa(j) + "."
+			pairs = append(pairs, prefix+"key", "S_123456789", prefix+"value", "123456789012345678901234.1234",
+				prefix+"text", strings.Repeat("x", 512))
+		}
+	}
+	if frames := feslFrames(packet("rank"), pairs...); len(frames) > 240 {
+		t.Fatalf("maximum admitted ranking reply needs %d fragments", len(frames))
+	}
+}
+
+func TestRelayRouteSelection(t *testing.T) {
+	host := netip.MustParseAddr("198.51.100.10")
+	guest := netip.MustParseAddr("203.0.113.20")
+	for _, test := range []struct {
+		name                       string
+		mode                       string
+		available, reachable, same bool
+		want                       relayRoute
+	}{
+		{"off", "off", true, true, false, direct},
+		{"auto unprobed", "auto", true, false, false, direct},
+		{"auto verified", "auto", true, true, false, forcedRelay},
+		{"always distinct", "always", true, false, false, forcedRelay},
+		{"always same address", "always", true, true, true, direct},
+		{"unavailable", "always", false, true, false, direct},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			peer := guest
+			if test.same {
+				peer = host
+			}
+			if got := relayRouteFor(test.mode, test.available, test.reachable, host, peer); got != test.want {
+				t.Fatalf("route=%v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestMapNameKeyMatchesLegacyCaseFold(t *testing.T) {
+	if got := mapNameKey("  Straße   Arena "); got != "strasse arena" {
+		t.Fatalf("map key %q", got)
+	}
+}
+
+func TestLoginKeysAreBoundedPerPersona(t *testing.T) {
+	keys := &loginKeys{keys: make(map[string]sessionKey)}
+	persona := storage.Persona{ID: 1, Name: "Player"}
+	issued := make([]string, maxPersonaLoginKeys+2)
+	for i := range issued {
+		issued[i] = keys.issue(persona)
+	}
+	if len(keys.keys) != maxPersonaLoginKeys {
+		t.Fatalf("retained %d keys", len(keys.keys))
+	}
+	if _, ok := keys.lookup(issued[0]); ok {
+		t.Fatal("oldest persona key was not retired")
+	}
+	if _, ok := keys.lookup(issued[len(issued)-1]); !ok {
+		t.Fatal("newest persona key was not retained")
+	}
+}
+
 func TestTheaterAdmission(t *testing.T) {
 	ln := loopbackListener(t)
 	keys := &loginKeys{keys: make(map[string]sessionKey)}
@@ -239,17 +305,24 @@ func TestPostgresPS2Services(t *testing.T) {
 	client.expect("blob", "ERRORCODE", "")
 	client.send("blob", "TXN", "GetBlobInfo", "BLOBID", id)
 	client.expect("blob", "RATING", "4.0000", "DOWNLOADCOUNT", "1")
+	client.send("blob", "TXN", "ListBlobInfo", "NAME", "Map "+alice, "MAXRECORDS", "1")
+	client.expect("blob", "BLOBS.0.BLOBID", id, "BLOBS.[]", "1")
 	client.send("fdbk", "TXN", "SendFeedback", "ORIGINATORUSERID", aliceID, "TARGETTYPE", "3",
 		"TARGETIDS.[]", "1", "TARGETIDS.0", id, "FEEDBACKTYPE", "1")
 	client.expect("fdbk", "ERRORCODE", "")
+	statID := aliceID
+	if len(statID) > 9 {
+		statID = statID[len(statID)-9:]
+	}
+	statKey := "S_" + statID
 	for range 2 {
 		client.send("rank", "TXN", "UpdateStats", "U.[]", "1", "U.0.OT", "1", "U.0.O", aliceID, "U.0.S.[]", "1",
-			"U.0.S.0.K", "S_5", "U.0.S.0.UT", "3", "U.0.S.0.V", "1")
+			"U.0.S.0.K", statKey, "U.0.S.0.UT", "3", "U.0.S.0.V", "1")
 		client.expect("rank", "ERRORCODE", "")
 	}
-	client.send("rank", "TXN", "GetTopN", "KEY", "S_5")
+	client.send("rank", "TXN", "GetTopN", "KEY", statKey)
 	client.expect("rank", "STATS.0.NAME", alice, "STATS.0.VALUE", "1.0000", "STATS.0.RANK", "1")
-	client.send("rank", "TXN", "GetStats", "KEYS.[]", "1", "KEYS.0", "S_5")
+	client.send("rank", "TXN", "GetStats", "KEYS.[]", "1", "KEYS.0", statKey)
 	client.expect("rank", "STATS.0.NAME", alice, "STATS.0.VALUE", "1.0000", "STATS.0.RANK", "1")
 }
 

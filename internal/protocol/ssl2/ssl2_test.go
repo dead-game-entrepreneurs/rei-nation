@@ -4,12 +4,55 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestLoadValidatesCertificateKeyPair(t *testing.T) {
+	certKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageKeyEncipherment}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &certKey.PublicKey, certKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certFile, keyFile := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeKey := func(key *rsa.PrivateKey) {
+		t.Helper()
+		if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY",
+			Bytes: x509.MarshalPKCS1PrivateKey(key)}), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeKey(certKey)
+	if _, err := Load(certFile, keyFile); err != nil {
+		t.Fatalf("matching pair: %v", err)
+	}
+	other, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeKey(other)
+	if _, err := Load(certFile, keyFile); err == nil {
+		t.Fatal("accepted a mismatched certificate and key")
+	}
+}
 
 func TestPS2HandshakeAndAriesStream(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)

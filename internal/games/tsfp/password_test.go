@@ -1,6 +1,7 @@
 package tsfp
 
 import (
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
@@ -17,6 +18,11 @@ func TestVerifyPassword(t *testing.T) {
 	}
 	if !verifyPassword(string(hash), "new-pass") || verifyPassword(string(hash), "wrong") {
 		t.Fatal("bcrypt password verification failed")
+	}
+	password72 := strings.Repeat("x", 72)
+	hash, err = bcrypt.GenerateFromPassword([]byte(password72), bcrypt.MinCost)
+	if err != nil || !verifyPassword(string(hash), password72) || verifyPassword(string(hash), password72+"x") {
+		t.Fatal("bcrypt password length boundary was not enforced")
 	}
 	for _, malformed := range []string{"tsfp-pbkdf2-sha256$", "tsfp-pbkdf2-sha256$0$AA$AA", "not-a-hash"} {
 		if verifyPassword(malformed, "anything") {

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/game"
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/protocol/aries"
@@ -136,8 +137,24 @@ func (f *fesl) Handle(ctx context.Context, c *aries.Client, in aries.Frame) {
 
 func (f *fesl) Disconnected(c *aries.Client) {
 	f.mu.Lock()
+	s := f.clients[c]
 	delete(f.clients, c)
 	f.mu.Unlock()
+	if s != nil && s.rankConnection != "" && f.ranking != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = f.ranking.ClearTSFPStatReceipts(ctx, s.rankConnection)
+	}
+}
+
+func (f *fesl) resetRankConnection(ctx context.Context, s *feslSession, active bool) {
+	if s.rankConnection != "" && f.ranking != nil {
+		_ = f.ranking.ClearTSFPStatReceipts(ctx, s.rankConnection)
+	}
+	s.rankConnection = ""
+	if active {
+		s.rankConnection = token(16)
+	}
 }
 
 func (f *fesl) respond(ctx context.Context, s *feslSession, in aries.Frame) []aries.Frame {
@@ -219,7 +236,8 @@ func (f *fesl) account(ctx context.Context, s *feslSession, command string, valu
 		return []string{}
 	case "login":
 		s.account, s.persona, s.maps = 0, storage.Persona{}, nil
-		s.rankConnection = token(16)
+		s.fragments = nil
+		f.resetRankConnection(ctx, s, true)
 		a, found, err := store.Account(ctx, name)
 		if err != nil {
 			return failure("99")
@@ -234,7 +252,8 @@ func (f *fesl) account(ctx context.Context, s *feslSession, command string, valu
 		return []string{"lkey", f.keys.issue(storage.Persona{}), "userId", strconv.FormatInt(a.ID, 10)}
 	case "logout":
 		s.account, s.persona, s.maps = 0, storage.Persona{}, nil
-		s.rankConnection = ""
+		s.fragments = nil
+		f.resetRankConnection(ctx, s, false)
 		return []string{}
 	}
 	if s.account == 0 {
@@ -256,7 +275,8 @@ func (f *fesl) account(ctx context.Context, s *feslSession, command string, valu
 		}
 		if command == "loginsubaccount" {
 			s.persona, s.maps = storage.Persona{}, nil
-			s.rankConnection = token(16)
+			s.fragments = nil
+			f.resetRankConnection(ctx, s, true)
 			for _, p := range personas {
 				if strings.EqualFold(p.Name, name) {
 					s.persona = p

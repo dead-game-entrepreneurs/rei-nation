@@ -18,17 +18,16 @@ import (
 )
 
 type theater struct {
-	mu          sync.Mutex
-	keys        *loginKeys
-	sessions    map[*aries.Client]*theaterSession
-	games       map[int]*match
-	hosting     map[*aries.Client]*match
-	nextID      int
-	relayIP     netip.Addr
-	udp         *net.UDPConn
-	relayMode   string
-	failedUntil map[int64]time.Time
-	probeSlots  chan struct{}
+	mu         sync.Mutex
+	keys       *loginKeys
+	sessions   map[*aries.Client]*theaterSession
+	games      map[int]*match
+	hosting    map[*aries.Client]*match
+	nextID     int
+	relayIP    netip.Addr
+	udp        *net.UDPConn
+	relayMode  string
+	probeSlots chan struct{}
 }
 
 type theaterSession struct {
@@ -71,7 +70,7 @@ type entrant struct {
 func newTheater(keys *loginKeys, relayIP netip.Addr, mode string) *theater {
 	return &theater{keys: keys, relayIP: relayIP, relayMode: mode,
 		sessions: make(map[*aries.Client]*theaterSession), games: make(map[int]*match),
-		hosting: make(map[*aries.Client]*match), failedUntil: make(map[int64]time.Time), probeSlots: make(chan struct{}, 16)}
+		hosting: make(map[*aries.Client]*match), probeSlots: make(chan struct{}, 16)}
 }
 
 var noEndpoint = netip.AddrPortFrom(netip.IPv4Unspecified(), 0)
@@ -165,7 +164,7 @@ func (t *theater) Handle(_ context.Context, c *aries.Client, in aries.Frame) {
 		ack(c, in.Tag, tid)
 	case "PLVT":
 		if hosted != nil {
-			t.removeEntrant(hosted, pid, false, false)
+			t.removeEntrant(hosted, pid, false)
 			ack(c, in.Tag, tid)
 		}
 	case "PENT":
@@ -306,7 +305,7 @@ func (t *theater) join(c *aries.Client, persona storage.Persona, tid string, f m
 	p.endpoint = endpoint
 	if pid != 1 {
 		t.probeRelay(g)
-		endpoint, p.route = t.joinRelay(g, pid, persona.ID, endpoint)
+		endpoint, p.route = t.joinRelay(g, pid, endpoint)
 	}
 	g.players[pid] = p
 	c.Send(packet("EGAM", "TID", tid, "REASON", "0", "QPOS", "0", "QLEN", "0"))
@@ -330,11 +329,9 @@ func (t *theater) approve(c *aries.Client, tid string, values map[string]string,
 		switch p.route {
 		case forcedRelay:
 			primary, alternate = g.relay.address(1), noEndpoint
-		case fallbackRelay:
-			alternate = g.relay.address(1)
 		}
 	} else {
-		t.removeEntrant(g, pid, false, false)
+		t.removeEntrant(g, pid, false)
 	}
 	ack(c, "EGRS", tid)
 	id := strconv.Itoa(g.id)
@@ -359,12 +356,12 @@ func (t *theater) Disconnected(c *aries.Client) {
 func (t *theater) removeGuest(g *match, c *aries.Client, cancelled bool) {
 	for pid, p := range g.players {
 		if p.client == c && pid != 1 {
-			t.removeEntrant(g, pid, true, cancelled)
+			t.removeEntrant(g, pid, true)
 		}
 	}
 }
 
-func (t *theater) removeEntrant(g *match, pid int, notify, failed bool) {
+func (t *theater) removeEntrant(g *match, pid int, notify bool) {
 	p := g.players[pid]
 	if p == nil {
 		return
@@ -372,9 +369,6 @@ func (t *theater) removeEntrant(g *match, pid int, notify, failed bool) {
 	if pid != 1 && !p.approved.IsZero() {
 		if notify {
 			g.owner.Send(packet("KICK", "PID", strconv.Itoa(pid)))
-		}
-		if failed && !p.active && p.route != forcedRelay && t.relayIP.IsValid() && time.Since(p.approved) <= 30*time.Second {
-			t.failedUntil[p.persona.ID] = time.Now().Add(24 * time.Hour)
 		}
 	}
 	delete(g.players, pid)
@@ -567,13 +561,8 @@ func (t *theater) expire(now time.Time, socket *net.UDPConn) {
 		}
 		for pid, p := range g.players {
 			if p.approved.IsZero() && now.Sub(p.requested) >= 45*time.Second {
-				t.removeEntrant(g, pid, false, false)
+				t.removeEntrant(g, pid, false)
 			}
-		}
-	}
-	for id, until := range t.failedUntil {
-		if !now.Before(until) {
-			delete(t.failedUntil, id)
 		}
 	}
 	for _, s := range t.sessions {

@@ -71,6 +71,7 @@ func (p *Postgres) TSFPFriendship(ctx context.Context, self, other, operation st
 			tsfpTitle, a, b).Scan(&inviter, &accepted)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
+			err = nil
 		case err != nil:
 			return err
 		case accepted:

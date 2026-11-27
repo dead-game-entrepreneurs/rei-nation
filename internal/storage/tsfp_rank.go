@@ -19,6 +19,7 @@ type TSFPRank struct {
 
 type TSFPRankStore interface {
 	ApplyTSFPStats(context.Context, int64, string, uint32, [32]byte, []TSFPStat) error
+	ClearTSFPStatReceipts(context.Context, string) error
 	TSFPStats(context.Context, int64, []string, bool, bool) ([]TSFPRank, error)
 	TSFPTop(context.Context, string, int, int) ([]TSFPRank, error)
 }
@@ -26,9 +27,6 @@ type TSFPRankStore interface {
 func (p *Postgres) ApplyTSFPStats(ctx context.Context, owner int64, connection string, code uint32, digest [32]byte,
 	updates []TSFPStat) error {
 	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, "DELETE FROM eanation.tsfp_stat_receipts WHERE received_at < now()-interval '1 day'"); err != nil {
-			return err
-		}
 		result, err := tx.Exec(ctx, `INSERT INTO eanation.tsfp_stat_receipts(connection,code,digest) VALUES ($1,$2,$3)
 			ON CONFLICT DO NOTHING`, connection, int64(code), digest[:])
 		if err != nil || result.RowsAffected() == 0 {
@@ -44,6 +42,11 @@ func (p *Postgres) ApplyTSFPStats(ctx context.Context, owner int64, connection s
 		}
 		return nil
 	})
+}
+
+func (p *Postgres) ClearTSFPStatReceipts(ctx context.Context, connection string) error {
+	_, err := p.pool.Exec(ctx, "DELETE FROM eanation.tsfp_stat_receipts WHERE connection=$1", connection)
+	return err
 }
 
 func (p *Postgres) TSFPStats(ctx context.Context, owner int64, keys []string, allTime, ranks bool) ([]TSFPRank, error) {

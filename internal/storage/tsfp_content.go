@@ -78,7 +78,7 @@ type TSFPFeedback struct {
 type TSFPStore interface {
 	CreateTSFPMap(context.Context, int64, string, TSFPMapMeta, []byte) (int64, error)
 	TSFPMap(context.Context, int64) (TSFPMap, bool, error)
-	TSFPMaps(context.Context) ([]TSFPMap, error)
+	TSFPMaps(context.Context, string, func(TSFPMap) bool) error
 	DownloadTSFPMap(context.Context, int64) ([]byte, bool, error)
 	DeleteTSFPMap(context.Context, int64, int64) (bool, error)
 	RateTSFPMap(context.Context, int64, int64, int) (bool, error)
@@ -107,12 +107,31 @@ func (p *Postgres) TSFPMap(ctx context.Context, id int64) (TSFPMap, bool, error)
 	return m, err == nil, ignoreMissing(err)
 }
 
-func (p *Postgres) TSFPMaps(ctx context.Context) ([]TSFPMap, error) {
-	rows, err := p.pool.Query(ctx, `SELECT `+tsfpMapFields+` FROM eanation.tsfp_maps ORDER BY id DESC`)
-	if err != nil {
-		return nil, err
+func (p *Postgres) TSFPMaps(ctx context.Context, order string, visit func(TSFPMap) bool) error {
+	orderBy := "id DESC"
+	switch order {
+	case "listblobinfo-name":
+		orderBy = "lower(coalesce(metadata->>'Name',metadata->>'name','')),id DESC"
+	case "topnblobdownloads":
+		orderBy = "downloads DESC,id DESC"
+	case "topnblobratings":
+		orderBy = "CASE WHEN reviews=0 THEN 0 ELSE rating_sum::double precision/reviews END DESC,id DESC"
 	}
-	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (TSFPMap, error) { return scanTSFPMap(row) })
+	rows, err := p.pool.Query(ctx, `SELECT `+tsfpMapFields+` FROM eanation.tsfp_maps ORDER BY `+orderBy)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		m, err := scanTSFPMap(rows)
+		if err != nil {
+			return err
+		}
+		if !visit(m) {
+			return nil
+		}
+	}
+	return rows.Err()
 }
 
 func (p *Postgres) DownloadTSFPMap(ctx context.Context, id int64) ([]byte, bool, error) {
