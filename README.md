@@ -21,6 +21,7 @@
   <a href="#dns-redirects">DNS redirects</a> ·
   <a href="#running-the-server">Running the server</a> ·
   <a href="docs/games/nascar04/online-map.md">NASCAR 04 notes</a> ·
+  <a href="docs/games/gera/online-map.md">GoldenEye notes</a> ·
   <a href="docs/games/tsfp/online-map.md">TSFP notes</a> ·
   <a href="#credits">Credits</a>
 </p>
@@ -42,6 +43,8 @@
 | Inbox replay, account recovery and relay ownership | 🧪 covered by automated tests |
 | Physical consoles, other disc regions and Internet NAT combinations | 🧪 awaiting wider testing |
 | Relay for EA SPORTS Talk | Unimplemented |
+
+**GoldenEye: Rogue Agent** (US PS2, `SLUS-21064`) has a `gera` adapter that uses EA FESL. Two PCSX2 machines on one LAN have signed in, registered accounts and personas, come online in the messenger, hosted, joined and played a full match. Stats, leaderboards and buddy lists are implemented but not yet tried in game. Play between different networks has not been tested. An optional UDP relay for strict NATs (`cmd/rei-relay`, ported from the TimeSplitters server) has only loopback tests. Voice chat is not done. See the [GoldenEye notes](docs/games/gera/online-map.md) and [Internet play](docs/games/gera/internet-play.md).
 
 The client owns race simulation. The server handles accounts, rooms, Messenger, peer setup, and ranked statistics. Message history is restored after the client loads its buddy and ignore lists. The game can display restored messages as unread again.
 
@@ -85,7 +88,16 @@ Point `ps2nascar04.ea.com` at the IPv4 address your PS2 or PCSX2 clients use to 
 address=/ps2nascar04.ea.com/192.0.2.10
 ```
 
-Replace `192.0.2.10` with your server address. The line above is for dnsmasq. Use [configs/nascar04.dns.yaml](configs/nascar04.dns.yaml) for revive-dns. Configure the PS2 network profile or PCSX2 to use your resolver and keep DNAS routing configured separately.
+Replace `192.0.2.10` with your server address. The line above is for dnsmasq. Use [configs/nascar04.dns.yaml](configs/nascar04.dns.yaml) for revive-dns.
+
+For GoldenEye: Rogue Agent, add `gera` to `REI_NATION_GAMES` and point both FESL names at the server. Use [configs/gera.dns.yaml](configs/gera.dns.yaml) for revive-dns.
+
+```text
+address=/gera.en_US.fesl.ea.com/192.0.2.10
+address=/gera.fesl.ea.com/192.0.2.10
+```
+
+Configure the PS2 network profile or PCSX2 to use your resolver and keep DNAS routing configured separately.
 
 For TSFP, redirect `tsfp.fesl.ea.com` to the same advertised address. A [revive-dns example](configs/tsfp.dns.yaml) is available. The two titles can share the resolver.
 
@@ -123,6 +135,10 @@ Allow these ports for the features you use.
 | TCP 18072 | TSFP Messenger |
 | TCP 18073 | Optional remote-relay control; restrict to the registered relay IP |
 | UDP 20000–20255 | Optional TSFP peer relay on its separate public address |
+| TCP 18040 | GoldenEye FESL (SSL 2.0), when `gera` is enabled |
+| TCP and UDP 18041 | GoldenEye Theater and endpoint discovery |
+| TCP 18042 | GoldenEye Messenger |
+| TCP 18043 | Optional GoldenEye relay-node sign-in; restrict to the registered relay IP |
 
 PostgreSQL and `/healthz` bind to the host loopback interface on ports `55434` and `8086` by default. `docker compose down` stops both services and keeps the database volume. The legacy client uses plaintext Aries on the network. Create an account password dedicated to the game.
 
@@ -168,6 +184,12 @@ only from the registered relay address.
 ```sh
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o tsfp-relay ./cmd/tsfp-relay
 ```
+
+GoldenEye has its own optional relay, `cmd/rei-relay`. Register a node with
+`rei-relay setup`, then set `REI_NATION_GERA_RELAY_DIR=/gera-relay` and point
+`REI_NATION_GERA_RELAY_HOST_DIR` at the directory it wrote; Compose mounts it
+read-only. `REI_NATION_GERA_RELAY_FORCE` lists personas that always join through
+a relay. See [GoldenEye Internet play](docs/games/gera/internet-play.md#relay).
 
 ### Messenger and account recovery
 

@@ -38,6 +38,14 @@ func (c *Client) Addr() netip.Addr {
 	return c.conn.RemoteAddr().(*net.TCPAddr).AddrPort().Addr().Unmap()
 }
 
+// LocalAddr is the server address this client connected to.
+func (c *Client) LocalAddr() netip.Addr {
+	if a, ok := c.conn.LocalAddr().(*net.TCPAddr); ok {
+		return a.AddrPort().Addr().Unmap()
+	}
+	return netip.Addr{}
+}
+
 func (c *Client) ID() uint64 { return c.id }
 
 // ClearInitialReadDeadline lets an authenticated connection use the transport's normal timeout.
@@ -97,6 +105,31 @@ func ServeWithHeartbeat(ctx context.Context, ln net.Listener, handler Handler, t
 	})
 }
 
+// ServeOptions sets per-protocol connection behavior.
+type ServeOptions struct {
+	// Heartbeat is the command sent every five seconds. Empty sends none, for
+	// clients that run their own keepalive transaction.
+	Heartbeat string
+	// IdleTimeout closes a silent client. Zero uses the 45-second Aries default;
+	// negative sets no read deadline and leaves dead peers to TCP keepalive.
+	IdleTimeout time.Duration
+	// AuthTimeout closes a client that has not called ClearInitialReadDeadline in time.
+	AuthTimeout time.Duration
+}
+
+func ServeWithOptions(ctx context.Context, ln net.Listener, handler Handler, opts ServeOptions) error {
+	transport := Transport{ReadTimeout: opts.IdleTimeout, InitialReadTimeout: opts.AuthTimeout}
+	if transport.ReadTimeout == 0 {
+		transport.ReadTimeout = 45 * time.Second
+	} else if transport.ReadTimeout < 0 {
+		transport.ReadTimeout = 0
+	}
+	if opts.Heartbeat != "" {
+		transport.Heartbeat, transport.HeartbeatInterval = Reply(opts.Heartbeat, nil), 5*time.Second
+	}
+	return ServeTransport(ctx, ln, handler, transport)
+}
+
 type Transport struct {
 	Upgrade            func(net.Conn) (net.Conn, error)
 	Heartbeat          Frame
@@ -151,6 +184,15 @@ func ServeTransport(ctx context.Context, ln net.Listener, handler Handler, trans
 }
 
 func serveClient(ctx context.Context, conn net.Conn, h Handler, transport Transport) {
+	// Detect peers that vanish without a FIN. Wrapped connections such as
+	// ssl2.Conn do not expose this, so their listeners enable it on the raw socket.
+	if ka, ok := conn.(interface {
+		SetKeepAlive(bool) error
+		SetKeepAlivePeriod(time.Duration) error
+	}); ok {
+		ka.SetKeepAlive(true)
+		ka.SetKeepAlivePeriod(30 * time.Second)
+	}
 	c := &Client{conn: conn, out: make(chan outgoing, 256), done: make(chan struct{}), id: nextClientID.Add(1)}
 	if transport.InitialReadTimeout > 0 {
 		c.initialReadDeadline.Store(time.Now().Add(transport.InitialReadTimeout).UnixNano())

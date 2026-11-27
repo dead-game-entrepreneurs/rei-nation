@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -12,11 +13,13 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/app"
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/game"
+	"github.com/dead-game-entrepreneurs/rei-nation/internal/games/gera"
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/games/nascar04"
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/games/tsfp"
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/storage"
@@ -25,7 +28,21 @@ import (
 func main() {
 	health := flag.Bool("healthcheck", false, "check the local readiness endpoint")
 	flag.Parse()
-	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	var dest io.Writer = os.Stderr
+	// REI_NATION_LOG_FILE also appends logs to a file; piping stderr on Windows mangles it.
+	var logFileErr error
+	if path := os.Getenv("REI_NATION_LOG_FILE"); path != "" && !*health {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err == nil {
+			defer f.Close()
+			dest = io.MultiWriter(os.Stderr, f)
+		}
+		logFileErr = err
+	}
+	log := slog.New(slog.NewJSONHandler(dest, nil))
+	if logFileErr != nil {
+		log.Warn("REI_NATION_LOG_FILE not opened; logging to stderr only", "error", logFileErr)
+	}
 	if err := run(*health, log); err != nil {
 		log.Error("Rei Nation stopped", "error", err)
 		os.Exit(1)
@@ -60,13 +77,17 @@ func run(health bool, log *slog.Logger) error {
 		return errors.New("invalid REI_NATION_PUBLIC_IP")
 	}
 	conf := app.Config{Games: env("REI_NATION_GAMES", "nascar04,tsfp"), Bind: bind, PublicIP: publicIP,
-		HealthPort: uint16(healthPort), Relay: env("REI_NATION_RELAY", "auto")}
+		HealthPort: uint16(healthPort), Relay: env("REI_NATION_RELAY", "auto"),
+		RelayDir: os.Getenv("REI_NATION_GERA_RELAY_DIR")}
+	if force := os.Getenv("REI_NATION_GERA_RELAY_FORCE"); force != "" {
+		conf.RelayForce = strings.Split(force, ",")
+	}
 	conf.SendRecoveryMail, err = app.NewRecoverySender(os.Getenv("REI_NATION_SMTP_ADDR"), os.Getenv("REI_NATION_SMTP_FROM"),
 		os.Getenv("REI_NATION_SMTP_USER"), os.Getenv("REI_NATION_SMTP_PASSWORD"))
 	if err != nil {
 		return err
 	}
-	selected, err := conf.Select([]game.Definition{nascar04.Definition(),
+	selected, err := conf.Select([]game.Definition{nascar04.Definition(), gera.Definition(conf.RelayDir != ""),
 		tsfp.Definition(env("REI_NATION_TSFP_CERT", "/tsfp-certs/fesl-cert.pem"),
 			env("REI_NATION_TSFP_KEY", "/tsfp-certs/fesl-key.pem"),
 			os.Getenv("REI_NATION_TSFP_RELAY_IP"), tsfp.RemoteRelayConfig{

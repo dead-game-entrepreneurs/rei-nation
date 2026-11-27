@@ -3,119 +3,354 @@ package ssl2
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/rc4"
 	"crypto/rsa"
-	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/binary"
-	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"net"
-	"os"
-	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/dead-game-entrepreneurs/rei-nation/internal/protocol/ssl2/ssl2test"
 )
 
-func TestLoadValidatesCertificateKeyPair(t *testing.T) {
-	certKey, err := rsa.GenerateKey(rand.Reader, 2048)
+// testClient speaks the subset of SSL 2.0 the server implements, from the
+// client side, so the test drives a real handshake and encrypted exchange.
+type testClient struct {
+	conn              net.Conn
+	readSeq, writeSeq uint32
+	enc, dec          *rc4.Cipher
+	rk, wk            []byte
+	plain             []byte
+}
+
+func (c *testClient) writeRecord(payload []byte) error {
+	seq := c.writeSeq
+	c.writeSeq++
+	body := payload
+	if c.enc != nil {
+		body = make([]byte, macSize+len(payload))
+		copy(body, recordMAC(c.writeKey(), payload, seq))
+		copy(body[macSize:], payload)
+		c.enc.XORKeyStream(body, body)
+	}
+	rec := make([]byte, 2+len(body))
+	binary.BigEndian.PutUint16(rec[:2], 0x8000|uint16(len(body)))
+	copy(rec[2:], body)
+	_, err := c.conn.Write(rec)
+	return err
+}
+
+func (c *testClient) readRecord() ([]byte, error) {
+	var hdr [2]byte
+	if _, err := io.ReadFull(c.conn, hdr[:]); err != nil {
+		return nil, err
+	}
+	if hdr[0]&0x80 == 0 {
+		return nil, errors.New("test client expects two-byte record headers")
+	}
+	length := int(hdr[0]&0x7f)<<8 | int(hdr[1])
+	data := make([]byte, length)
+	if _, err := io.ReadFull(c.conn, data); err != nil {
+		return nil, err
+	}
+	seq := c.readSeq
+	c.readSeq++
+	if c.dec == nil {
+		return data, nil
+	}
+	c.dec.XORKeyStream(data, data)
+	mac, content := data[:macSize], data[macSize:]
+	if !bytes.Equal(mac, recordMAC(c.readKey(), content, seq)) {
+		return nil, errors.New("client saw a bad MAC")
+	}
+	return content, nil
+}
+
+// The client reads with the server's write key and writes with its read key.
+func (c *testClient) readKey() []byte  { return c.rk }
+func (c *testClient) writeKey() []byte { return c.wk }
+
+func (c *testClient) Read(p []byte) (int, error) {
+	for len(c.plain) == 0 {
+		rec, err := c.readRecord()
+		if err != nil {
+			return 0, err
+		}
+		c.plain = rec
+	}
+	n := copy(p, c.plain)
+	c.plain = c.plain[n:]
+	return n, nil
+}
+
+func handshakeClient(t *testing.T, conn net.Conn) *testClient {
+	t.Helper()
+	c := &testClient{conn: conn}
+	challenge := make([]byte, 16)
+	rand.Read(challenge)
+	hello := []byte{1}
+	hello = appendU16(hello, 2)
+	hello = appendU16(hello, len(rc4MD5))
+	hello = appendU16(hello, 0)
+	hello = appendU16(hello, len(challenge))
+	hello = append(hello, rc4MD5...)
+	hello = append(hello, challenge...)
+	if err := c.writeRecord(hello); err != nil {
+		t.Fatal(err)
+	}
+	serverHello, err := c.readRecord()
 	if err != nil {
 		t.Fatal(err)
 	}
-	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test"},
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageKeyEncipherment}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, &certKey.PublicKey, certKey)
+	if serverHello[0] != 4 {
+		t.Fatalf("expected SERVER-HELLO, got type %d", serverHello[0])
+	}
+	certLen := int(binary.BigEndian.Uint16(serverHello[5:7]))
+	csLen := int(binary.BigEndian.Uint16(serverHello[7:9]))
+	connLen := int(binary.BigEndian.Uint16(serverHello[9:11]))
+	certDER := serverHello[11 : 11+certLen]
+	connID := serverHello[11+certLen+csLen : 11+certLen+csLen+connLen]
+	pub, err := ssl2test.PublicKeyFromCertificate(certDER)
+	if err != nil {
+		t.Fatalf("client could not read the server certificate key: %v", err)
+	}
+
+	master := make([]byte, 16)
+	rand.Read(master)
+	encMaster, err := rsa.EncryptPKCS1v15(rand.Reader, pub, master)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
-	certFile, keyFile := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
-	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+	masterKey := []byte{2}
+	masterKey = append(masterKey, rc4MD5...)
+	masterKey = appendU16(masterKey, 0)
+	masterKey = appendU16(masterKey, len(encMaster))
+	masterKey = appendU16(masterKey, 0)
+	masterKey = append(masterKey, encMaster...)
+	if err := c.writeRecord(masterKey); err != nil {
 		t.Fatal(err)
 	}
-	writeKey := func(key *rsa.PrivateKey) {
-		t.Helper()
-		if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY",
-			Bytes: x509.MarshalPKCS1PrivateKey(key)}), 0o600); err != nil {
+	c.wk = keyedMD5(master, []byte("1"), challenge, connID)
+	c.rk = keyedMD5(master, []byte("0"), challenge, connID)
+	c.enc, _ = rc4.NewCipher(c.wk)
+	c.dec, _ = rc4.NewCipher(c.rk)
+
+	verify, err := c.readRecord()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(verify, append([]byte{5}, challenge...)) {
+		t.Fatal("SERVER-VERIFY did not echo the challenge")
+	}
+	if err := c.writeRecord(append([]byte{3}, connID...)); err != nil {
+		t.Fatal(err)
+	}
+	finished, err := c.readRecord()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(finished) != 17 || finished[0] != 6 {
+		t.Fatalf("unexpected SERVER-FINISHED %x", finished)
+	}
+	return c
+}
+
+func TestHandshakeAndEncryptedEcho(t *testing.T) {
+	certDER, key, err := GenerateCertificate("fesl.ea.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	sln := NewListener(ln, certDER, key, nil)
+	go func() {
+		conn, err := sln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 512)
+		for {
+			n, err := conn.Read(buf)
+			if err != nil {
+				return
+			}
+			if _, err := conn.Write(buf[:n]); err != nil {
+				return
+			}
+		}
+	}()
+
+	raw, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	raw.SetDeadline(time.Now().Add(5 * time.Second))
+	c := handshakeClient(t, raw)
+
+	for _, msg := range []string{"hello world", "another encrypted line"} {
+		if err := c.writeRecord([]byte(msg)); err != nil {
 			t.Fatal(err)
 		}
-	}
-	writeKey(certKey)
-	if _, err := Load(certFile, keyFile); err != nil {
-		t.Fatalf("matching pair: %v", err)
-	}
-	other, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeKey(other)
-	if _, err := Load(certFile, keyFile); err == nil {
-		t.Fatal("accepted a mismatched certificate and key")
+		got := make([]byte, len(msg))
+		if _, err := io.ReadFull(c, got); err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != msg {
+			t.Fatalf("echo = %q, want %q", got, msg)
+		}
 	}
 }
 
-func TestPS2HandshakeAndAriesStream(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+func TestRejectsWrongCipher(t *testing.T) {
+	certDER, key, err := GenerateCertificate("fesl.ea.com")
 	if err != nil {
 		t.Fatal(err)
 	}
-	left, right := net.Pipe()
-	t.Cleanup(func() { left.Close(); right.Close() })
-	if err := right.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
 		t.Fatal(err)
 	}
-	serverDone := make(chan error, 1)
-	want := bytes.Repeat([]byte("Aries"), 14000)
-	cert := []byte("synthetic RSA certificate bytes")
+	defer ln.Close()
+	sln := NewListener(ln, certDER, key, nil)
+	errc := make(chan error, 1)
+	acceptErr := make(chan error, 1)
 	go func() {
-		conn, err := (&Server{cert: cert, key: key}).Accept(left)
-		if err == nil {
-			buf := make([]byte, len(want))
-			if _, err = io.ReadFull(conn, buf); err == nil {
-				_, err = conn.Write(buf)
+		conn, err := sln.Accept()
+		if err != nil {
+			acceptErr <- err
+			return
+		}
+		defer conn.Close()
+		_, err = conn.Read(make([]byte, 1))
+		errc <- err
+	}()
+
+	raw, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	c := &testClient{conn: raw}
+	// A ClientHello offering only a cipher the server does not implement.
+	hello := []byte{1}
+	hello = appendU16(hello, 2)
+	hello = appendU16(hello, 3)
+	hello = appendU16(hello, 0)
+	hello = appendU16(hello, 16)
+	hello = append(hello, 0x02, 0x00, 0x80) // SSL_CK_RC4_128_EXPORT40_WITH_MD5
+	hello = append(hello, make([]byte, 16)...)
+	if err := c.writeRecord(hello); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-acceptErr:
+		t.Fatalf("accept failed: %v", err)
+	case err := <-errc:
+		if err == nil || !strings.Contains(err.Error(), "did not offer RC4-128-MD5") {
+			t.Fatalf("handshake error = %v, want the unsupported-cipher rejection", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not reject the handshake")
+	}
+}
+
+func TestCertificateWorkaroundOIDs(t *testing.T) {
+	certDER, _, err := GenerateCertificate("fesl.ea.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cert struct {
+		TBS struct {
+			Raw       asn1.RawContent
+			Version   int `asn1:"optional,explicit,default:0,tag:0"`
+			Serial    *big.Int
+			SigAlg    pkix.AlgorithmIdentifier
+			Issuer    asn1.RawValue
+			Validity  struct{ NotBefore, NotAfter asn1.RawValue }
+			Subject   asn1.RawValue
+			PublicKey struct {
+				Algorithm pkix.AlgorithmIdentifier
+				Key       asn1.BitString
 			}
 		}
-		serverDone <- err
-	}()
-	client := &stream{Conn: right}
-	challenge := []byte("abcdef0123456789")
-	if err := client.writeRecord(append([]byte{1, 0, 2, 0, 3, 0, 0, 0, 16, 1, 0, 0x80}, challenge...)); err != nil {
+		SigAlg pkix.AlgorithmIdentifier
+		Sig    asn1.BitString
+	}
+	if _, err := asn1.Unmarshal(certDER, &cert); err != nil {
 		t.Fatal(err)
 	}
-	hello, err := client.readRecord()
-	if err != nil || len(hello) != 30+len(cert) || !bytes.Equal(hello[11:11+len(cert)], cert) {
-		t.Fatalf("ServerHello: %x, %v", hello, err)
+	for _, check := range []struct {
+		field string
+		got   asn1.ObjectIdentifier
+		want  []byte
+	}{
+		{"inner signature", cert.TBS.SigAlg.Algorithm, oidMD5WithRSA},
+		{"outer signature", cert.SigAlg.Algorithm, oidRSAEncryption},
+		{"public key", cert.TBS.PublicKey.Algorithm.Algorithm, oidRSAEncryption},
+	} {
+		der, err := asn1.Marshal(check.got)
+		if err != nil || !bytes.Equal(der[2:], check.want) {
+			t.Errorf("%s OID = %v", check.field, check.got)
+		}
 	}
-	connID := hello[len(hello)-16:]
-	master := []byte("0123456789abcdef")
-	encrypted, err := rsa.EncryptPKCS1v15(rand.Reader, &key.PublicKey, master)
+	// Both validity dates must stay ASN.1 UTCTime (tag 23) for the client.
+	for _, v := range []asn1.RawValue{cert.TBS.Validity.NotBefore, cert.TBS.Validity.NotAfter} {
+		if v.Tag != asn1.TagUTCTime {
+			t.Errorf("validity tag = %d, want UTCTime", v.Tag)
+		}
+	}
+}
+
+// The caller's read deadline must still bound the first application read after
+// the lazy handshake replaces it.
+func TestReadDeadlineSurvivesHandshake(t *testing.T) {
+	certDER, key, err := GenerateCertificate("fesl.ea.com")
 	if err != nil {
 		t.Fatal(err)
 	}
-	masterKey := binary.BigEndian.AppendUint16([]byte{2, 1, 0, 0x80, 0, 0}, uint16(len(encrypted)))
-	masterKey = append(masterKey, 0, 0)
-	if err := client.writeRecord(append(masterKey, encrypted...)); err != nil {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
 		t.Fatal(err)
 	}
-	client.in.enable(master, '0', challenge, connID)
-	client.out.enable(master, '1', challenge, connID)
-	if verify, err := client.readRecord(); err != nil || !bytes.Equal(verify, append([]byte{5}, challenge...)) {
-		t.Fatalf("ServerVerify: %x, %v", verify, err)
-	}
-	if err := client.writeRecord(append([]byte{3}, connID...)); err != nil {
+	t.Cleanup(func() { ln.Close() })
+	sln := NewListener(ln, certDER, key, nil)
+	errc := make(chan error, 1)
+	go func() {
+		conn, err := sln.Accept()
+		if err != nil {
+			errc <- err
+			return
+		}
+		defer conn.Close()
+		conn.SetReadDeadline(time.Now().Add(time.Second))
+		_, err = conn.Read(make([]byte, 1))
+		errc <- err
+	}()
+	raw, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if finished, err := client.readRecord(); err != nil || len(finished) != 17 || finished[0] != 6 {
-		t.Fatalf("ServerFinished: %x, %v", finished, err)
-	}
-	if _, err := client.Write(want); err != nil {
-		t.Fatal(err)
-	}
-	got := make([]byte, len(want))
-	if _, err := io.ReadFull(client, got); err != nil || !bytes.Equal(got, want) {
-		t.Fatalf("Aries stream did not round-trip: %v", err)
-	}
-	if err := <-serverDone; err != nil {
-		t.Fatal(err)
+	t.Cleanup(func() { raw.Close() })
+	raw.SetDeadline(time.Now().Add(5 * time.Second))
+	handshakeClient(t, raw)
+	select {
+	case err := <-errc:
+		var ne net.Error
+		if !errors.As(err, &ne) || !ne.Timeout() {
+			t.Fatalf("first read error = %v, want a timeout", err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("first read after the handshake had no deadline")
 	}
 }

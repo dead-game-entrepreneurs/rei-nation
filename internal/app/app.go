@@ -24,6 +24,8 @@ type Config struct {
 	PublicIP         netip.Addr
 	HealthPort       uint16
 	Relay            string
+	RelayDir         string
+	RelayForce       []string
 	SendRecoveryMail func(ctx context.Context, recipient, subject, body string) error
 }
 
@@ -116,7 +118,7 @@ func Run(ctx context.Context, c Config, selected []game.Definition, store Store,
 			return fmt.Errorf("bind %s: %w", d.Key, err)
 		}
 		options := game.Options{PublicIP: c.PublicIP, TCPPort: d.TCPPort, Store: store,
-			Log: log.With("game", d.Key), Relay: c.Relay, SendRecoveryMail: c.SendRecoveryMail,
+			Log: log.With("game", d.Key), Relay: c.Relay, RelayDir: c.RelayDir, RelayForce: c.RelayForce, SendRecoveryMail: c.SendRecoveryMail,
 			AuxTCP: make(map[uint16]net.Listener), UDP: make(map[uint16]*net.UDPConn)}
 		for _, port := range d.AuxTCP {
 			if options.AuxTCP[port], err = bind(c.Bind, port); err != nil {

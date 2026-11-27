@@ -23,5 +23,6 @@ COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=build --chown=65534:65534 /out/tsfp-certs /tsfp-certs
 USER 65534:65534
 EXPOSE 10600/tcp 5000/tcp 3658/tcp 3658/udp 3659/udp 9999/udp
+EXPOSE 18040/tcp 18041/tcp 18041/udp 18042/tcp 18043/tcp
 EXPOSE 18070/tcp 18071/tcp 18071/udp 18072/tcp
 ENTRYPOINT ["/rei-nation"]

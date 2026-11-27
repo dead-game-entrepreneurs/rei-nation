@@ -12,11 +12,13 @@ import (
 )
 
 type Definition struct {
-	Key      string
-	TCPPort  uint16
-	AuxTCP   []uint16
-	UDP      []uint16
-	New      func(Options) Runtime
+	Key     string
+	TCPPort uint16
+	AuxTCP  []uint16
+	UDP     []uint16
+	New     func(Options) Runtime
+	// Serve runs the main TCP listener. Nil uses aries.Serve. A title sets it
+	// when its clients need SSL or a different keepalive or idle limit.
 	Serve    func(context.Context, net.Listener, Runtime) error
 	Validate func(netip.Addr) error
 }
@@ -27,12 +29,16 @@ type Runtime interface {
 }
 
 type Options struct {
-	PublicIP         netip.Addr
-	TCPPort          uint16
-	Store            storage.IdentityStore
-	Log              *slog.Logger
-	AuxTCP           map[uint16]net.Listener
-	UDP              map[uint16]*net.UDPConn
-	Relay            string
+	PublicIP netip.Addr
+	TCPPort  uint16
+	Store    storage.IdentityStore
+	Log      *slog.Logger
+	AuxTCP   map[uint16]net.Listener
+	UDP      map[uint16]*net.UDPConn
+	Relay    string
+	// RelayDir holds the GoldenEye relay certificate and tokens; RelayForce lists
+	// personas (names, IDs or "*") that always join through a relay.
+	RelayDir         string
+	RelayForce       []string
 	SendRecoveryMail func(ctx context.Context, recipient, subject, body string) error
 }
