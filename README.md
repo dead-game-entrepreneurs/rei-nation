@@ -5,8 +5,8 @@
 <h3 align="center">Bringing EA Nation games back online</h3>
 
 <p align="center">
-  A Go replacement for <b>EA Nation's Aries online services</b>,<br>
-  with a tested <b>NASCAR Thunder 2004</b> adapter for PlayStation 2.
+  A Go replacement for <b>EA Nation's Aries and FESL online services</b>,<br>
+  with PlayStation 2 adapters for <b>NASCAR Thunder 2004</b> and <b>TimeSplitters: Future Perfect</b>.
 </p>
 
 <p align="center">
@@ -21,6 +21,7 @@
   <a href="#dns-redirects">DNS redirects</a> ·
   <a href="#running-the-server">Running the server</a> ·
   <a href="docs/games/nascar04/online-map.md">NASCAR 04 notes</a> ·
+  <a href="docs/games/tsfp/online-map.md">TSFP notes</a> ·
   <a href="#credits">Credits</a>
 </p>
 
@@ -44,14 +45,34 @@
 
 The client owns race simulation. The server handles accounts, rooms, Messenger, peer setup, and ranked statistics. Message history is restored after the client loads its buddy and ignore lists. The game can display restored messages as unread again.
 
+**TimeSplitters: Future Perfect** (US PS2, `SLUS-21148`) is available as an opt-in adapter.
+
+| Feature | Status |
+| --- | --- |
+| FESL account login and persona selection | ✅ tested on a stock PS2 |
+| Theater matchmaking and endpoint discovery | 🧪 covered by automated tests |
+| Messenger friends, presence and offline messages | 🧪 covered by automated tests |
+| Map sharing, ratings and persona statistics | 🧪 covered by automated tests |
+| Direct play on a LAN | 🧪 ready for a two-console test |
+| Internet play and the optional UDP relay | 🧪 awaiting a WAN test |
+
+The TSFP adapter uses the retail client's SSLv2 transport, keeps title-specific
+wire behavior under `internal/games/tsfp`, and shares accounts, social storage,
+mail and PostgreSQL infrastructure with the other adapters. See the
+[TSFP operator guide](docs/games/tsfp/online-map.md) for its service flow and
+remaining validation work.
+
 ## How it fits together
 
 ```text
 PS2 / PCSX2 ── DNS ──────────▶ your resolver
      ├── DNAS ───────────────▶ separately configured DNAS service
-     ├── Aries lobby ────────▶ Rei Nation TCP 10600
-     ├── EA Messenger ───────▶ Rei Nation TCP 5000
-     └── Race traffic ───────▶ the other console directly or through Rei Nation's UDP relay
+     ├── NASCAR Aries ───────▶ Rei Nation TCP 10600
+     ├── NASCAR Messenger ───▶ Rei Nation TCP 5000
+     ├── TSFP FESL ──────────▶ Rei Nation TCP 18070
+     ├── TSFP Theater ───────▶ Rei Nation TCP and UDP 18071
+     ├── TSFP Messenger ─────▶ Rei Nation TCP 18072
+     └── Game traffic ───────▶ the other console directly or through a configured relay
 ```
 
 The lobby issues the key used to authenticate Messenger on its own connection. The game can close and reopen its lobby socket during a race while Messenger stays connected. The [NASCAR 04 network map](docs/games/nascar04/online-map.md) covers the wire protocol and result flow.
@@ -66,6 +87,8 @@ address=/ps2nascar04.ea.com/192.0.2.10
 
 Replace `192.0.2.10` with your server address. The line above is for dnsmasq. Use [configs/nascar04.dns.yaml](configs/nascar04.dns.yaml) for revive-dns. Configure the PS2 network profile or PCSX2 to use your resolver and keep DNAS routing configured separately.
 
+For TSFP, redirect `tsfp.fesl.ea.com` to the same advertised address. A [revive-dns example](configs/tsfp.dns.yaml) is available. The two titles can share the resolver.
+
 ## Running the server
 
 Use Docker Compose on a Linux host with host networking.
@@ -77,7 +100,10 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Set `REI_NATION_PUBLIC_IP` in `.env` to the server's LAN or public IPv4 address. Choose a unique `POSTGRES_PASSWORD`, then start the stack.
+Set `REI_NATION_PUBLIC_IP` in `.env` to the server's LAN or public IPv4 address.
+Choose a unique `POSTGRES_PASSWORD`. The default game is NASCAR 04. Set
+`REI_NATION_GAMES=tsfp` for TSFP, or `REI_NATION_GAMES=nascar04,tsfp` to run
+both adapters in one process. Then start the stack.
 
 ```sh
 docker compose up -d --build --wait
@@ -92,8 +118,16 @@ Allow these ports for the features you use.
 | TCP 5000 | EA Messenger |
 | UDP 3658, 3659, 9999 | Peer relay |
 | TCP 3658 | ProtoMangle HTTP helper for compatible clients. This NASCAR race path does not use it. |
+| TCP 18070 | TSFP FESL |
+| TCP and UDP 18071 | TSFP Theater and endpoint discovery |
+| TCP 18072 | TSFP Messenger |
+| UDP 20000–20255 | Optional TSFP peer relay on a separate server address |
 
 PostgreSQL and `/healthz` bind to the host loopback interface on ports `55434` and `8086` by default. `docker compose down` stops both services and keeps the database volume. The legacy client uses plaintext Aries on the network. Create an account password dedicated to the game.
+
+The image includes the TSFP FESL certificate and key under `/tsfp-certs`, so
+Compose does not need a certificate volume. Direct binary runs can override the
+paths with `REI_NATION_TSFP_CERT` and `REI_NATION_TSFP_KEY`.
 
 ### Relay
 
@@ -101,17 +135,42 @@ Set `REI_NATION_RELAY` in `.env` to choose the route before matchmaking hands of
 
 | Value | Behavior |
 | --- | --- |
-| `auto` | Uses direct play on a LAN and selects the relay for two distinct public addresses when a mapping is available. |
-| `always` | Prefers the relay when both drivers have distinct source IPv4 addresses, including on a LAN. |
+| `auto` | Uses direct play until the host's public mapping is verified, then selects the relay for distinct public addresses. |
+| `always` | Prefers the relay when both peers have distinct source IPv4 addresses, including on a LAN. |
 | `off` | Uses direct play. |
 
-Each source IP can belong to one active relay pair. If both consoles share an address or a route is already in use, the server offers direct play. The stock client accepts one endpoint per attempt and has no automatic relay retry. The relay covers race traffic. EA SPORTS Talk uses UDP `6000` directly between peers.
+For TSFP, relay members are pinned to the UDP address observed during matchmaking; packets from another source port are rejected. If both consoles share an address, the server offers direct play. The stock client accepts one endpoint per attempt and has no automatic relay retry. NASCAR race traffic uses the relay independently; EA SPORTS Talk uses UDP `6000` directly between peers.
 
 ### Messenger and account recovery
 
 If the game's fast sign-in restores the lobby but Messenger still errors, sign out of EA Online and sign back in to rerun the game's Messenger startup.
 
 To enable **Forgot Account Name** and **Forgot Password**, configure `REI_NATION_SMTP_ADDR` and `REI_NATION_SMTP_FROM`. The mail server must support STARTTLS. Set `REI_NATION_SMTP_USER` and `REI_NATION_SMTP_PASSWORD` if it requires authentication. A recovery password expires after 30 minutes or becomes the account password on first use. Players can then choose another password with **Edit Account**.
+
+### Migrating an original TSFP server
+
+The SQLite importer preserves account IDs, legacy passwords, personas,
+friendships, queued messages, maps and map ratings. Take a consistent copy of
+the original `accounts.sqlite3`, initialize an empty Rei Nation database, stop
+the Rei Nation process while importing, and run:
+
+```sh
+set -e
+docker compose up -d --build --wait
+docker compose stop rei-nation
+import_sql="$(mktemp)"
+trap 'rm -f "$import_sql"' EXIT
+python3 scripts/migrate-tsfp-sqlite.py /path/to/accounts.sqlite3 > "$import_sql"
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U eanation -d eanation < "$import_sql"
+docker compose start rei-nation
+```
+
+The importer is transactional and refuses to load into a database that already
+contains accounts. When legacy accounts reuse one recovery email, the first
+account keeps it and later duplicates are cleared to satisfy Rei Nation's unique
+email rule. Original Django ranking totals live in its PostgreSQL database
+rather than `accounts.sqlite3`; migrate those totals separately before retiring
+that database. Login sessions are recreated when players sign in to Rei Nation.
 
 ## Development
 
@@ -123,7 +182,7 @@ go vet ./...
 go build -o bin/rei-nation ./cmd/rei-nation
 ```
 
-Run `scripts/test-integration.sh` on Linux with Docker and OpenSSL to test both sockets, Messenger retention, UDP relay, and PostgreSQL-backed stats in a disposable Compose project. It binds the test stack to loopback. `REI_NATION_TEST_BIND`, `REI_NATION_TEST_PG_PORT`, and `REI_NATION_TEST_HEALTH_PORT` can move the test listeners if their defaults are already in use.
+Run `scripts/test-integration.sh` on Linux with Docker and OpenSSL to test NASCAR's deployed sockets and TSFP's PostgreSQL-backed service flows in a disposable Compose project. It binds the test stack to loopback. `REI_NATION_TEST_BIND`, `REI_NATION_TEST_PG_PORT`, and `REI_NATION_TEST_HEALTH_PORT` can move the test listeners if their defaults are already in use.
 
 Title adapters live under `internal/games`. `internal/protocol/aries` handles wire framing and TCP connections, `internal/connectivity` handles peer introduction, and `internal/storage` handles PostgreSQL persistence.
 
@@ -134,6 +193,7 @@ Title adapters live under `internal/games`. `internal/protocol/aries` handles wi
 - [mohh-master-server contributors](https://github.com/a-blondel/mohh-master-server) developed the predecessor to EA Nation Server.
 - [riperiperi and Breakin-In contributors](https://github.com/riperiperi/Breakin-In) published the Apache-2.0 server for The Sims: Bustin' Out (PS2). Rei Nation's initial Go adapter targets NASCAR Thunder 2004.
 - [Quetzal contributors](https://github.com/dead-game-entrepreneurs/quetzal) provided the reference for the Docker and DNS setup.
+- [The original TSFP server](https://github.com/princebyyourlogic/tsfp-server-recreation/tree/1de3a50c04a5a3389f927db7ca63a4833771605d) provided the PS2 service implementation and client research used for the Go adapter.
 
 ## License
 

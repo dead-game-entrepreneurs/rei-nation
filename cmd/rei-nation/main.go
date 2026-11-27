@@ -18,6 +18,7 @@ import (
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/app"
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/game"
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/games/nascar04"
+	"github.com/dead-game-entrepreneurs/rei-nation/internal/games/tsfp"
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/storage"
 )
 
@@ -65,9 +66,19 @@ func run(health bool, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	selected, err := conf.Select([]game.Definition{nascar04.Definition()})
+	selected, err := conf.Select([]game.Definition{nascar04.Definition(),
+		tsfp.Definition(env("REI_NATION_TSFP_CERT", "/tsfp-certs/fesl-cert.pem"),
+			env("REI_NATION_TSFP_KEY", "/tsfp-certs/fesl-key.pem"),
+			os.Getenv("REI_NATION_TSFP_RELAY_IP"))})
 	if err != nil {
 		return err
+	}
+	for _, title := range selected {
+		if title.Validate != nil {
+			if err := title.Validate(conf.PublicIP); err != nil {
+				return err
+			}
+		}
 	}
 	dsn := os.Getenv("REI_NATION_DATABASE_URL")
 	if dsn == "" {
