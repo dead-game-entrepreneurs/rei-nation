@@ -24,6 +24,8 @@ import (
 const relayControlPort = 18073
 const relayControlLimit = 4096
 
+var errRelayRoomLost = errors.New("remote relay room was lost")
+
 type relayControlMessage struct {
 	Op        string           `json:"op"`
 	ID        string           `json:"id,omitempty"`
@@ -361,34 +363,34 @@ func (r *remoteRelayRoom) add(pid int, endpoint netip.AddrPort) error {
 	if r.dead {
 		return errors.New("relay room is closed")
 	}
-	requested := make(map[int]netip.AddrPort, len(r.endpoints)+1)
-	wire := make(map[string][]any, len(r.endpoints)+1)
-	for id, known := range r.endpoints {
-		requested[id] = known
-		wire[strconv.Itoa(id)] = []any{known.Addr().String(), known.Port()}
-	}
-	requested[pid] = endpoint
-	wire[strconv.Itoa(pid)] = []any{endpoint.Addr().String(), endpoint.Port()}
-	reply, err := r.hub.request(relayControlMessage{Op: "add", Room: r.id, Members: wire}, 3*time.Second)
+	reply, err := r.hub.request(relayControlMessage{Op: "add", Room: r.id, Members: map[string][]any{
+		strconv.Itoa(pid): {endpoint.Addr().String(), endpoint.Port()},
+	}}, 3*time.Second)
 	if err != nil {
 		return fmt.Errorf("add remote relay member: %w", err)
 	}
 	if reply.Op != "added" {
 		return errors.New("relay rejected member")
 	}
-	ports := make(map[int]uint16, len(requested))
+	ports := make(map[int]uint16, len(r.endpoints)+1)
 	for key, port := range reply.Ports {
 		id, parseErr := strconv.Atoi(key)
-		if parseErr == nil && port > 0 && port <= 65535 && requested[id].IsValid() {
+		if parseErr == nil && port > 0 && port <= 65535 {
 			ports[id] = uint16(port)
 		}
 	}
-	for id := range requested {
+	for id := range r.endpoints {
 		if ports[id] == 0 {
-			return errors.New("relay did not restore every member port")
+			r.dead = true
+			_, _ = r.hub.request(relayControlMessage{Op: "close", Room: r.id}, 3*time.Second)
+			return errRelayRoomLost
 		}
 	}
-	r.endpoints, r.ports = requested, ports
+	if ports[pid] == 0 {
+		return errors.New("relay did not assign a member port")
+	}
+	r.endpoints[pid] = endpoint
+	r.ports = ports
 	return nil
 }
 

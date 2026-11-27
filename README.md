@@ -54,7 +54,7 @@ The client owns race simulation. The server handles accounts, rooms, Messenger, 
 | Messenger friends, presence and offline messages | 🧪 covered by automated tests |
 | Map sharing, ratings and persona statistics | 🧪 covered by automated tests |
 | Direct play on a LAN | 🧪 ready for a two-console test |
-| Internet play and the optional UDP relay | 🧪 awaiting a WAN test |
+| Internet play and the optional UDP relay | 🧪 awaiting WAN and NAT-compatibility tests |
 
 The TSFP adapter uses the retail client's SSLv2 transport, keeps title-specific
 wire behavior under `internal/games/tsfp`, and shares accounts, social storage,
@@ -145,7 +145,11 @@ Set `REI_NATION_RELAY` in `.env` to choose the route before matchmaking hands of
 | `always` | Prefers the relay when both peers have distinct source IPv4 addresses, including on a LAN. |
 | `off` | Uses direct play. |
 
-For TSFP, relay members are pinned to the UDP address observed during matchmaking; packets from another source port are rejected. If both consoles share an address, the server offers direct play. The stock client accepts one endpoint per attempt and has no automatic relay retry. NASCAR race traffic uses the relay independently; EA SPORTS Talk uses UDP `6000` directly between peers.
+For TSFP, relay members are pinned to the UDP address observed during matchmaking; packets from another source port are rejected. This requires endpoint-independent NAT behavior: a NAT that assigns a different public source port for Theater and relay traffic cannot use the relay. If both consoles share an address, the server offers direct play. The stock client accepts one endpoint per attempt and has no automatic relay retry. NASCAR race traffic uses the relay independently; EA SPORTS Talk uses UDP `6000` directly between peers.
+
+If the remote relay restarts or expires an active room, Rei Nation tears down
+that match when it detects the lost state so players restart matchmaking with
+current relay ports instead of continuing with stale destinations.
 
 The TSFP relay must use a public IPv4 distinct from Theater. If that address is
 assigned to the same host, set `REI_NATION_TSFP_RELAY_IP` and leave the remote
@@ -192,26 +196,8 @@ docker compose start rei-nation
 The importer is transactional and refuses to load into a database that already
 contains accounts. When legacy accounts reuse one recovery email, the first
 account keeps it and later duplicates are cleared to satisfy Rei Nation's unique
-email rule. When Django PostgreSQL is authoritative, export the complete
-account, social, map, rating, and all-time persona-stat dataset directly
-instead. Run the exporter against a consistent source snapshot and feed its
-output to an initialized, empty Rei Nation database:
-
-```sh
-set -e
-umask 077
-import_sql="$(mktemp)"
-trap 'rm -f "$import_sql"' EXIT
-psql -XqAt -v ON_ERROR_STOP=1 "$OLD_DATABASE_URL" \
-  -f scripts/migrate-tsfp-django.sql > "$import_sql"
-psql -X -v ON_ERROR_STOP=1 "$REI_NATION_DATABASE_URL" < "$import_sql"
-```
-
-The generated import is transactional and refuses a nonempty account table.
-It preserves numeric IDs and converts the original password hashes without
-exposing plaintext passwords. Keep both the source database backup and the
-generated import protected because they contain account and map data. Login
-sessions are recreated when players sign in to Rei Nation.
+email rule. The retired Django production database has already been migrated;
+its one-time importer is intentionally not part of the active server tooling.
 
 ## Development
 

@@ -52,15 +52,15 @@ func relayRouteFor(mode string, available, reachable bool, host, guest netip.Add
 	return direct
 }
 
-func (t *theater) joinRelay(g *match, pid int, endpoint netip.AddrPort) (netip.AddrPort, relayRoute) {
+func (t *theater) joinRelay(g *match, pid int, endpoint netip.AddrPort) (netip.AddrPort, relayRoute, error) {
 	available := t.relayHub != nil && t.relayHub.available() || t.relayHub == nil && t.relayIP.IsValid()
 	if !available || t.relayMode == "off" {
-		return endpoint, direct
+		return endpoint, direct, nil
 	}
 	host := t.endpoint(g.owner, g.external).Addr()
 	route := relayRouteFor(t.relayMode, true, g.relayReachable, host, endpoint.Addr())
 	if route == direct {
-		return endpoint, direct
+		return endpoint, direct, nil
 	}
 	room := g.relay
 	if room == nil {
@@ -72,7 +72,7 @@ func (t *theater) joinRelay(g *match, pid int, endpoint netip.AddrPort) (netip.A
 		}
 		if room.add(1, t.endpoint(g.owner, g.external)) != nil {
 			room.close()
-			return endpoint, direct
+			return endpoint, direct, nil
 		}
 		for otherPID, p := range g.players {
 			if otherPID == 1 {
@@ -80,18 +80,21 @@ func (t *theater) joinRelay(g *match, pid int, endpoint netip.AddrPort) (netip.A
 			}
 			if room.add(otherPID, t.endpoint(p.client, p.endpoint)) != nil {
 				room.close()
-				return endpoint, direct
+				return endpoint, direct, nil
 			}
 		}
 	}
-	if room.add(pid, endpoint) != nil {
+	if err := room.add(pid, endpoint); err != nil {
 		if g.relay == nil {
 			room.close()
 		}
-		return endpoint, direct
+		if errors.Is(err, errRelayRoomLost) {
+			return endpoint, direct, err
+		}
+		return endpoint, direct, nil
 	}
 	g.relay = room
-	return room.address(pid), route
+	return room.address(pid), route, nil
 }
 
 func (r *relayRoom) add(pid int, endpoint netip.AddrPort) error {

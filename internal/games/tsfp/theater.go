@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/binary"
+	"errors"
 	"net"
 	"net/netip"
 	"sort"
@@ -310,7 +311,13 @@ func (t *theater) join(c *aries.Client, persona storage.Persona, tid string, f m
 	p.endpoint = endpoint
 	if pid != 1 {
 		t.probeRelay(g)
-		endpoint, p.route = t.joinRelay(g, pid, endpoint)
+		var relayErr error
+		endpoint, p.route, relayErr = t.joinRelay(g, pid, endpoint)
+		if errors.Is(relayErr, errRelayRoomLost) {
+			t.closeMatch(g)
+			c.Send(packet("EGAMjden", "TID", tid, "REASON", "f"))
+			return
+		}
 	}
 	g.players[pid] = p
 	c.Send(packet("EGAM", "TID", tid, "REASON", "0", "QPOS", "0", "QLEN", "0"))

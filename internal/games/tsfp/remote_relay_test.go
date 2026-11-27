@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -74,15 +75,8 @@ func TestRemoteRelayControlAndForwarding(t *testing.T) {
 	if err := room.add(1, host.LocalAddr().(*net.UDPAddr).AddrPort()); err != nil {
 		t.Fatal(err)
 	}
-	remote := room.(*remoteRelayRoom)
-	if _, err := hub.request(relayControlMessage{Op: "close", Room: remote.id}, time.Second); err != nil {
-		t.Fatalf("simulate relay room loss: %v", err)
-	}
 	if err := room.add(2, guest.LocalAddr().(*net.UDPAddr).AddrPort()); err != nil {
-		t.Fatalf("restore room after relay loss: %v", err)
-	}
-	if !room.address(1).IsValid() || !room.address(2).IsValid() {
-		t.Fatal("restored room is missing a member port")
+		t.Fatal(err)
 	}
 	if _, err := host.WriteToUDPAddrPort([]byte("host mapping"), room.address(2)); err != nil {
 		t.Fatal(err)
@@ -101,6 +95,14 @@ func TestRemoteRelayControlAndForwarding(t *testing.T) {
 	}
 	if data, source := receiveUDP(t, guest); string(data) != "host reply" || source != room.address(1) {
 		t.Fatalf("guest received %q from %s", data, source)
+	}
+	remote := room.(*remoteRelayRoom)
+	if _, err := hub.request(relayControlMessage{Op: "close", Room: remote.id}, time.Second); err != nil {
+		t.Fatalf("simulate relay room loss: %v", err)
+	}
+	third := testUDP(t, "127.0.0.4")
+	if err := room.add(3, third.LocalAddr().(*net.UDPAddr).AddrPort()); !errors.Is(err, errRelayRoomLost) {
+		t.Fatalf("add after relay room loss returned %v", err)
 	}
 	room.close()
 }
