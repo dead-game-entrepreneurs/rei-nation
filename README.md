@@ -45,7 +45,7 @@
 
 The client owns race simulation. The server handles accounts, rooms, Messenger, peer setup, and ranked statistics. Message history is restored after the client loads its buddy and ignore lists. The game can display restored messages as unread again.
 
-**TimeSplitters: Future Perfect** (US PS2, `SLUS-21148`) is available as an opt-in adapter.
+**TimeSplitters: Future Perfect** (US PS2, `SLUS-21148`) is enabled alongside NASCAR 04 by default.
 
 | Feature | Status |
 | --- | --- |
@@ -101,9 +101,9 @@ chmod 600 .env
 ```
 
 Set `REI_NATION_PUBLIC_IP` in `.env` to the server's LAN or public IPv4 address.
-Choose a unique `POSTGRES_PASSWORD`. The default game is NASCAR 04. Set
-`REI_NATION_GAMES=tsfp` for TSFP, or `REI_NATION_GAMES=nascar04,tsfp` to run
-both adapters in one process. Then start the stack.
+Choose a unique `POSTGRES_PASSWORD`. NASCAR 04 and TSFP run together by
+default. Set `REI_NATION_GAMES` only when intentionally limiting a deployment
+to a subset of the supported adapters. Then start the stack.
 
 ```sh
 docker compose up -d --build --wait
@@ -215,6 +215,12 @@ go build -o bin/rei-nation ./cmd/rei-nation
 ```
 
 Run `scripts/test-integration.sh` on Linux with Docker and OpenSSL to test NASCAR's deployed sockets and TSFP's PostgreSQL-backed service flows in a disposable Compose project. It binds the test stack to loopback. `REI_NATION_TEST_BIND`, `REI_NATION_TEST_PG_PORT`, and `REI_NATION_TEST_HEALTH_PORT` can move the test listeners if their defaults are already in use.
+
+Pushes to `main` deploy both the server and remote TSFP relay only after the
+verification and integration jobs pass. Deployment credentials live in the
+protected `production` GitHub environment, never in the public repository.
+An organization administrator must approve each production job. The SSH key is
+also restricted on each host to the matching script under `deploy/`.
 
 Title adapters live under `internal/games`. `internal/protocol/aries` handles wire framing and TCP connections, `internal/connectivity` handles peer introduction, and `internal/storage` handles PostgreSQL persistence.
 

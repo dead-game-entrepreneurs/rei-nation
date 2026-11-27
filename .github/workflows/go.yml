@@ -31,3 +31,55 @@ jobs:
           go-version-file: go.mod
       - name: Test against PostgreSQL and real network listeners
         run: scripts/test-integration.sh
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [verify, integration]
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: rei-nation-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Configure restricted deployment key
+        env:
+          DEPLOY_KEY: ${{ secrets.REI_NATION_DEPLOY_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.REI_NATION_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$DEPLOY_KEY" && test -n "$DEPLOY_KNOWN_HOSTS"
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_KEY" > "$HOME/.ssh/rei-nation-deploy"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+      - name: Deploy server to RackNerd
+        env:
+          DEPLOY_HOST: ${{ secrets.REI_NATION_RACK_HOST }}
+          DEPLOY_USER: ${{ secrets.REI_NATION_RACK_USER }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_HOST" && test -n "$DEPLOY_USER"
+          git archive --format=tar "$GITHUB_SHA" | ssh -i "$HOME/.ssh/rei-nation-deploy" \
+            -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$DEPLOY_USER@$DEPLOY_HOST" "deploy $GITHUB_SHA"
+      - name: Build relay package
+        run: |
+          set -euo pipefail
+          install -d dist
+          CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o dist/tsfp-relay ./cmd/tsfp-relay
+          install -m 0644 deploy/tsfp-relay.service dist/tsfp-relay.service
+          tar -C dist -cf relay.tar tsfp-relay tsfp-relay.service
+          sha256sum relay.tar | cut -d' ' -f1 > relay.tar.sha256
+      - name: Deploy relay1
+        env:
+          DEPLOY_HOST: ${{ secrets.REI_NATION_RELAY_HOST }}
+          DEPLOY_USER: ${{ secrets.REI_NATION_RELAY_USER }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_HOST" && test -n "$DEPLOY_USER"
+          digest=$(cat relay.tar.sha256)
+          ssh -i "$HOME/.ssh/rei-nation-deploy" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" "deploy-relay $digest" < relay.tar

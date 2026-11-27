@@ -27,7 +27,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      REI_NATION_GAMES: ${REI_NATION_GAMES:-nascar04}
+      REI_NATION_GAMES: ${REI_NATION_GAMES:-nascar04,tsfp}
       REI_NATION_BIND: ${REI_NATION_BIND:-0.0.0.0}
       REI_NATION_PUBLIC_IP: ${REI_NATION_PUBLIC_IP:?set REI_NATION_PUBLIC_IP in .env}
       REI_NATION_HEALTH_PORT: ${REI_NATION_HEALTH_PORT:-8086}
