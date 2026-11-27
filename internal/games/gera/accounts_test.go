@@ -96,7 +96,8 @@ func dialHandler(t *testing.T, s *server) (*aries.Frame, net.Conn, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	// One deadline covers the whole test; bcrypt under -race needs several seconds.
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
 	return nil, conn, func() {
 		conn.Close()
 		cancel()
