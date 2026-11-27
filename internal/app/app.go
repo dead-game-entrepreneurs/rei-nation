@@ -164,11 +164,12 @@ func Run(ctx context.Context, c Config, selected []game.Definition, store Store,
 	}}
 	for _, t := range runtimes {
 		handler := t.def.New(t.opts)
-		serve := t.def.Serve
-		if serve == nil {
-			serve = aries.Serve
-		}
-		services = append(services, func(ctx context.Context) error { return serve(ctx, t.ln, handler) })
+		services = append(services, func(ctx context.Context) error {
+			if t.def.Serve != nil {
+				return t.def.Serve(ctx, t.ln, handler)
+			}
+			return aries.Serve(ctx, t.ln, handler)
+		})
 		services = append(services, handler.Services()...)
 		log.Info("title listeners ready", "game", t.def.Key, "bind", t.ln.Addr(), "public_ip", c.PublicIP)
 	}

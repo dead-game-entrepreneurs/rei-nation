@@ -5,3 +5,6 @@
 !cmd/**
 !internal/
 !internal/**
+!configs/
+!configs/tsfp-certs/
+!configs/tsfp-certs/**

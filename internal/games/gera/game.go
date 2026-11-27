@@ -74,7 +74,7 @@ func Definition() game.Definition {
 			}
 			return s
 		},
-		Serve: func(ctx context.Context, ln net.Listener, h aries.Handler) error {
+		Serve: func(ctx context.Context, ln net.Listener, h game.Runtime) error {
 			s := h.(*server)
 			if s.certErr != nil {
 				return s.certErr

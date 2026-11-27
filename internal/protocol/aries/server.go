@@ -17,11 +17,12 @@ type Handler interface {
 }
 
 type Client struct {
-	conn net.Conn
-	out  chan outgoing
-	done chan struct{}
-	once sync.Once
-	id   uint64
+	conn                net.Conn
+	out                 chan outgoing
+	done                chan struct{}
+	once                sync.Once
+	id                  uint64
+	initialReadDeadline atomic.Int64
 	// Written before done closes and read only after observing its closure.
 	closeReason string
 }
@@ -46,6 +47,9 @@ func (c *Client) LocalAddr() netip.Addr {
 }
 
 func (c *Client) ID() uint64 { return c.id }
+
+// ClearInitialReadDeadline lets an authenticated connection use the transport's normal timeout.
+func (c *Client) ClearInitialReadDeadline() { c.initialReadDeadline.Store(0) }
 
 // Send queues in order without letting a slow client hold up a title runtime.
 func (c *Client) Send(f Frame) {
@@ -96,7 +100,9 @@ func Serve(ctx context.Context, ln net.Listener, handler Handler) error {
 
 // ServeWithHeartbeat uses the keepalive command expected by the connected clients.
 func ServeWithHeartbeat(ctx context.Context, ln net.Listener, handler Handler, tag string) error {
-	return ServeWithOptions(ctx, ln, handler, ServeOptions{Heartbeat: tag})
+	return ServeTransport(ctx, ln, handler, Transport{
+		Heartbeat: Reply(tag, nil), HeartbeatInterval: 5 * time.Second, ReadTimeout: 45 * time.Second,
+	})
 }
 
 // ServeOptions sets per-protocol connection behavior.
@@ -104,24 +110,34 @@ type ServeOptions struct {
 	// Heartbeat is the command sent every five seconds. Empty sends none, for
 	// clients that run their own keepalive transaction.
 	Heartbeat string
-	// IdleTimeout closes a client that sends nothing for this long. Zero uses
-	// the 45-second Aries default.
+	// IdleTimeout closes a silent client. Zero uses the 45-second Aries default;
+	// negative sets no read deadline and leaves dead peers to TCP keepalive.
 	IdleTimeout time.Duration
 }
 
 func ServeWithOptions(ctx context.Context, ln net.Listener, handler Handler, opts ServeOptions) error {
-	const maxClients = 128
-	var heartbeat *Frame
+	transport := Transport{ReadTimeout: opts.IdleTimeout}
+	if transport.ReadTimeout == 0 {
+		transport.ReadTimeout = 45 * time.Second
+	} else if transport.ReadTimeout < 0 {
+		transport.ReadTimeout = 0
+	}
 	if opts.Heartbeat != "" {
-		f := Reply(opts.Heartbeat, nil)
-		heartbeat = &f
+		transport.Heartbeat, transport.HeartbeatInterval = Reply(opts.Heartbeat, nil), 5*time.Second
 	}
-	idle := opts.IdleTimeout
-	if idle == 0 {
-		idle = 45 * time.Second
-	}
-	// A negative idle means no read deadline: the client may stay silent (for
-	// example while loading a level) and TCP keepalive detects a dead peer.
+	return ServeTransport(ctx, ln, handler, transport)
+}
+
+type Transport struct {
+	Upgrade            func(net.Conn) (net.Conn, error)
+	Heartbeat          Frame
+	HeartbeatInterval  time.Duration
+	ReadTimeout        time.Duration
+	InitialReadTimeout time.Duration
+}
+
+func ServeTransport(ctx context.Context, ln net.Listener, handler Handler, transport Transport) error {
+	const maxClients = 128
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(ctx, func() { ln.Close() })
 	var clients sync.WaitGroup
@@ -146,7 +162,18 @@ func ServeWithOptions(ctx context.Context, ln net.Listener, handler Handler, opt
 			go func() {
 				defer clients.Done()
 				defer func() { <-slots }()
-				serveClient(ctx, conn, handler, heartbeat, idle)
+				if transport.Upgrade != nil {
+					stop := context.AfterFunc(ctx, func() { conn.Close() })
+					upgraded, err := transport.Upgrade(conn)
+					stop()
+					if err != nil {
+						conn.Close()
+						return
+					}
+					serveClient(ctx, upgraded, handler, transport)
+					return
+				}
+				serveClient(ctx, conn, handler, transport)
 			}()
 		default:
 			conn.Close()
@@ -154,10 +181,9 @@ func ServeWithOptions(ctx context.Context, ln net.Listener, handler Handler, opt
 	}
 }
 
-func serveClient(ctx context.Context, conn net.Conn, h Handler, heartbeat *Frame, idle time.Duration) {
+func serveClient(ctx context.Context, conn net.Conn, h Handler, transport Transport) {
 	// Detect peers that vanish without a FIN, since a long idle window would
-	// otherwise leave the connection open. The underlying socket is a TCP conn
-	// for both plaintext and SSL-wrapped listeners.
+	// otherwise leave the connection open. SSL-wrapped listeners set it themselves.
 	if ka, ok := conn.(interface {
 		SetKeepAlive(bool) error
 		SetKeepAlivePeriod(time.Duration) error
@@ -166,17 +192,20 @@ func serveClient(ctx context.Context, conn net.Conn, h Handler, heartbeat *Frame
 		ka.SetKeepAlivePeriod(30 * time.Second)
 	}
 	c := &Client{conn: conn, out: make(chan outgoing, 256), done: make(chan struct{}), id: nextClientID.Add(1)}
+	if transport.InitialReadTimeout > 0 {
+		c.initialReadDeadline.Store(time.Now().Add(transport.InitialReadTimeout).UnixNano())
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(ctx, func() { c.CloseWithReason("server shutdown") })
 	writerDone := make(chan struct{})
 	go func() {
 		defer close(writerDone)
 		defer c.Close()
-		var pings <-chan time.Time
-		if heartbeat != nil {
-			ping := time.NewTicker(5 * time.Second)
+		var heartbeat <-chan time.Time
+		if transport.HeartbeatInterval > 0 {
+			ping := time.NewTicker(transport.HeartbeatInterval)
 			defer ping.Stop()
-			pings = ping.C
+			heartbeat = ping.C
 		}
 		for {
 			var entry outgoing
@@ -184,8 +213,8 @@ func serveClient(ctx context.Context, conn net.Conn, h Handler, heartbeat *Frame
 			case <-c.done:
 				return
 			case entry = <-c.out:
-			case <-pings:
-				entry.frame = *heartbeat
+			case <-heartbeat:
+				entry.frame = transport.Heartbeat
 			}
 			if conn.SetWriteDeadline(time.Now().Add(5*time.Second)) != nil || entry.frame.Write(conn) != nil {
 				c.CloseWithReason("socket write failed")
@@ -205,9 +234,15 @@ func serveClient(ctx context.Context, conn net.Conn, h Handler, heartbeat *Frame
 		<-writerDone
 	}()
 	for {
-		deadline := time.Time{}
-		if idle > 0 {
-			deadline = time.Now().Add(idle)
+		var deadline time.Time
+		if transport.ReadTimeout > 0 {
+			deadline = time.Now().Add(transport.ReadTimeout)
+		}
+		if initial := c.initialReadDeadline.Load(); initial > 0 {
+			initialDeadline := time.Unix(0, initial)
+			if deadline.IsZero() || initialDeadline.Before(deadline) {
+				deadline = initialDeadline
+			}
 		}
 		if conn.SetReadDeadline(deadline) != nil {
 			c.CloseWithReason("could not set read deadline")

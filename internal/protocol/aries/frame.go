@@ -16,9 +16,10 @@ const (
 )
 
 type Frame struct {
-	Tag  string
-	Code [4]byte
-	Body string
+	Tag       string
+	Code      [4]byte
+	Body      string
+	Terminate bool
 }
 
 func Read(r io.Reader) (Frame, error) {
@@ -82,7 +83,7 @@ func (f Frame) Write(w io.Writer) error {
 		return errors.New("invalid Aries command tag")
 	}
 	size := headerSize
-	if f.Body != "" {
+	if f.Body != "" || f.Terminate {
 		size += len(f.Body) + 1
 	}
 	if size > MaxFrame {

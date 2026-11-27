@@ -21,6 +21,7 @@ import (
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/game"
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/games/gera"
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/games/nascar04"
+	"github.com/dead-game-entrepreneurs/rei-nation/internal/games/tsfp"
 	"github.com/dead-game-entrepreneurs/rei-nation/internal/storage"
 )
 
@@ -70,7 +71,7 @@ func run(health bool, log *slog.Logger) error {
 	if err != nil {
 		return errors.New("invalid REI_NATION_PUBLIC_IP")
 	}
-	conf := app.Config{Games: env("REI_NATION_GAMES", "nascar04"), Bind: bind, PublicIP: publicIP,
+	conf := app.Config{Games: env("REI_NATION_GAMES", "nascar04,tsfp"), Bind: bind, PublicIP: publicIP,
 		HealthPort: uint16(healthPort), Relay: env("REI_NATION_RELAY", "auto"),
 		RelayDir: os.Getenv("REI_NATION_GERA_RELAY_DIR")}
 	if force := os.Getenv("REI_NATION_GERA_RELAY_FORCE"); force != "" {
@@ -81,9 +82,23 @@ func run(health bool, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	selected, err := conf.Select([]game.Definition{nascar04.Definition(), gera.Definition()})
+	selected, err := conf.Select([]game.Definition{nascar04.Definition(), gera.Definition(),
+		tsfp.Definition(env("REI_NATION_TSFP_CERT", "/tsfp-certs/fesl-cert.pem"),
+			env("REI_NATION_TSFP_KEY", "/tsfp-certs/fesl-key.pem"),
+			os.Getenv("REI_NATION_TSFP_RELAY_IP"), tsfp.RemoteRelayConfig{
+				TokensFile: os.Getenv("REI_NATION_TSFP_RELAY_TOKENS"),
+				CertFile:   os.Getenv("REI_NATION_TSFP_RELAY_CONTROL_CERT"),
+				KeyFile:    os.Getenv("REI_NATION_TSFP_RELAY_CONTROL_KEY"),
+			})})
 	if err != nil {
 		return err
+	}
+	for _, title := range selected {
+		if title.Validate != nil {
+			if err := title.Validate(conf.PublicIP); err != nil {
+				return err
+			}
+		}
 	}
 	dsn := os.Getenv("REI_NATION_DATABASE_URL")
 	if dsn == "" {

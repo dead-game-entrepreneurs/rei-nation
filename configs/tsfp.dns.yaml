@@ -1,0 +1,5 @@
+# Example for revive-dns. Set up the appropriate PS2 DNAS routing separately.
+- service: rei-nation-tsfp
+  names:
+    - tsfp.fesl.ea.com
+  answer: "192.0.2.10"

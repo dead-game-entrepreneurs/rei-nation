@@ -126,6 +126,7 @@ func (p *Postgres) initialize(ctx context.Context) error {
 				account_id bigint PRIMARY KEY REFERENCES eanation.accounts(id), requested_at timestamptz NOT NULL,
 				password_hash text, expires_at timestamptz
 			)`,
+			tsfpSchema,
 		} {
 			if _, err := tx.Exec(ctx, stmt); err != nil {
 				return err
