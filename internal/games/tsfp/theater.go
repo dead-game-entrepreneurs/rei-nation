@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/binary"
+	"errors"
 	"net"
 	"net/netip"
 	"sort"
@@ -25,6 +26,7 @@ type theater struct {
 	hosting    map[*aries.Client]*match
 	nextID     int
 	relayIP    netip.Addr
+	relayHub   *remoteRelayHub
 	udp        *net.UDPConn
 	relayMode  string
 	probeSlots chan struct{}
@@ -49,7 +51,7 @@ type match struct {
 	attrs, details     map[string]string
 	players            map[int]*entrant
 	activity           time.Time
-	relay              *relayRoom
+	relay              relaySession
 	relayReachable     bool
 	relayProbeAddr     netip.AddrPort
 	relayProbedAt      time.Time
@@ -67,8 +69,12 @@ type entrant struct {
 	endpoint  netip.AddrPort
 }
 
-func newTheater(keys *loginKeys, relayIP netip.Addr, mode string) *theater {
-	return &theater{keys: keys, relayIP: relayIP, relayMode: mode,
+func newTheater(keys *loginKeys, relayIP netip.Addr, mode string, hubs ...*remoteRelayHub) *theater {
+	var hub *remoteRelayHub
+	if len(hubs) != 0 {
+		hub = hubs[0]
+	}
+	return &theater{keys: keys, relayIP: relayIP, relayHub: hub, relayMode: mode,
 		sessions: make(map[*aries.Client]*theaterSession), games: make(map[int]*match),
 		hosting: make(map[*aries.Client]*match), probeSlots: make(chan struct{}, 16)}
 }
@@ -305,7 +311,13 @@ func (t *theater) join(c *aries.Client, persona storage.Persona, tid string, f m
 	p.endpoint = endpoint
 	if pid != 1 {
 		t.probeRelay(g)
-		endpoint, p.route = t.joinRelay(g, pid, endpoint)
+		var relayErr error
+		endpoint, p.route, relayErr = t.joinRelay(g, pid, endpoint)
+		if errors.Is(relayErr, errRelayRoomLost) {
+			t.closeMatch(g)
+			c.Send(packet("EGAMjden", "TID", tid, "REASON", "f"))
+			return
+		}
 	}
 	g.players[pid] = p
 	c.Send(packet("EGAM", "TID", tid, "REASON", "0", "QPOS", "0", "QLEN", "0"))

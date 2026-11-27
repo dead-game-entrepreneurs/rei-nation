@@ -1,0 +1,26 @@
+[Unit]
+Description=Rei Nation TSFP UDP relay
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=tsfprelay
+Group=tsfprelay
+EnvironmentFile=/etc/rei-nation/tsfp-relay
+ExecStart=/usr/local/bin/tsfp-relay --server ${TSFP_RELAY_SERVER} --ca ${TSFP_RELAY_CA} --token-file ${TSFP_RELAY_TOKEN_FILE} --public-ip ${TSFP_RELAY_PUBLIC_IP} --bind ${TSFP_RELAY_BIND} --ports ${TSFP_RELAY_PORTS} --name ${TSFP_RELAY_NAME}
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

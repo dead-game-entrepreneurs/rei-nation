@@ -45,7 +45,7 @@
 
 The client owns race simulation. The server handles accounts, rooms, Messenger, peer setup, and ranked statistics. Message history is restored after the client loads its buddy and ignore lists. The game can display restored messages as unread again.
 
-**TimeSplitters: Future Perfect** (US PS2, `SLUS-21148`) is available as an opt-in adapter.
+**TimeSplitters: Future Perfect** (US PS2, `SLUS-21148`) is enabled alongside NASCAR 04 by default.
 
 | Feature | Status |
 | --- | --- |
@@ -54,7 +54,7 @@ The client owns race simulation. The server handles accounts, rooms, Messenger, 
 | Messenger friends, presence and offline messages | 🧪 covered by automated tests |
 | Map sharing, ratings and persona statistics | 🧪 covered by automated tests |
 | Direct play on a LAN | 🧪 ready for a two-console test |
-| Internet play and the optional UDP relay | 🧪 awaiting a WAN test |
+| Internet play and the optional UDP relay | 🧪 awaiting WAN and NAT-compatibility tests |
 
 The TSFP adapter uses the retail client's SSLv2 transport, keeps title-specific
 wire behavior under `internal/games/tsfp`, and shares accounts, social storage,
@@ -101,9 +101,9 @@ chmod 600 .env
 ```
 
 Set `REI_NATION_PUBLIC_IP` in `.env` to the server's LAN or public IPv4 address.
-Choose a unique `POSTGRES_PASSWORD`. The default game is NASCAR 04. Set
-`REI_NATION_GAMES=tsfp` for TSFP, or `REI_NATION_GAMES=nascar04,tsfp` to run
-both adapters in one process. Then start the stack.
+Choose a unique `POSTGRES_PASSWORD`. NASCAR 04 and TSFP run together by
+default. Set `REI_NATION_GAMES` only when intentionally limiting a deployment
+to a subset of the supported adapters. Then start the stack.
 
 ```sh
 docker compose up -d --build --wait
@@ -121,13 +121,19 @@ Allow these ports for the features you use.
 | TCP 18070 | TSFP FESL |
 | TCP and UDP 18071 | TSFP Theater and endpoint discovery |
 | TCP 18072 | TSFP Messenger |
-| UDP 20000–20255 | Optional TSFP peer relay on a separate server address |
+| TCP 18073 | Optional remote-relay control; restrict to the registered relay IP |
+| UDP 20000–20255 | Optional TSFP peer relay on its separate public address |
 
 PostgreSQL and `/healthz` bind to the host loopback interface on ports `55434` and `8086` by default. `docker compose down` stops both services and keeps the database volume. The legacy client uses plaintext Aries on the network. Create an account password dedicated to the game.
 
 The image includes the TSFP FESL certificate and key under `/tsfp-certs`, so
 Compose does not need a certificate volume. Direct binary runs can override the
 paths with `REI_NATION_TSFP_CERT` and `REI_NATION_TSFP_KEY`.
+Because direct binary runs also select both games by default, they must point
+those variables at readable certificate files (for a source checkout, use
+`configs/tsfp-certs/fesl-cert.pem` and `configs/tsfp-certs/fesl-key.pem`). An
+existing NASCAR-only binary deployment can instead keep its previous behavior
+with `REI_NATION_GAMES=nascar04`.
 
 ### Relay
 
@@ -139,7 +145,29 @@ Set `REI_NATION_RELAY` in `.env` to choose the route before matchmaking hands of
 | `always` | Prefers the relay when both peers have distinct source IPv4 addresses, including on a LAN. |
 | `off` | Uses direct play. |
 
-For TSFP, relay members are pinned to the UDP address observed during matchmaking; packets from another source port are rejected. If both consoles share an address, the server offers direct play. The stock client accepts one endpoint per attempt and has no automatic relay retry. NASCAR race traffic uses the relay independently; EA SPORTS Talk uses UDP `6000` directly between peers.
+For TSFP, relay members are pinned to the UDP address observed during matchmaking; packets from another source port are rejected. This requires endpoint-independent NAT behavior: a NAT that assigns a different public source port for Theater and relay traffic cannot use the relay. If both consoles share an address, the server offers direct play. The stock client accepts one endpoint per attempt and has no automatic relay retry. NASCAR race traffic uses the relay independently; EA SPORTS Talk uses UDP `6000` directly between peers.
+
+If the remote relay restarts or expires an active room, Rei Nation tears down
+that match when it detects the lost state so players restart matchmaking with
+current relay ports instead of continuing with stale destinations.
+
+The TSFP relay must use a public IPv4 distinct from Theater. If that address is
+assigned to the same host, set `REI_NATION_TSFP_RELAY_IP` and leave the remote
+relay settings empty. For a separate relay host, also set
+`REI_NATION_TSFP_RELAY_TOKENS`, `REI_NATION_TSFP_RELAY_CONTROL_CERT`, and
+`REI_NATION_TSFP_RELAY_CONTROL_KEY`. The token registry uses the original
+`name sha256:<digest> public-ip` format and stores no plaintext token.
+
+Build the remote node and install the supplied systemd unit and environment
+template from `deploy/`. The node keeps the plaintext token in its root-owned
+token file, pins the control certificate, and dials Theater over TLS. Theater
+also verifies the token digest, node name, declared public address, and TCP
+source address. Allow its UDP range publicly and allow TCP 18073 on Theater
+only from the registered relay address.
+
+```sh
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o tsfp-relay ./cmd/tsfp-relay
+```
 
 ### Messenger and account recovery
 
@@ -168,9 +196,8 @@ docker compose start rei-nation
 The importer is transactional and refuses to load into a database that already
 contains accounts. When legacy accounts reuse one recovery email, the first
 account keeps it and later duplicates are cleared to satisfy Rei Nation's unique
-email rule. Original Django ranking totals live in its PostgreSQL database
-rather than `accounts.sqlite3`; migrate those totals separately before retiring
-that database. Login sessions are recreated when players sign in to Rei Nation.
+email rule. The retired Django production database has already been migrated;
+its one-time importer is intentionally not part of the active server tooling.
 
 ## Development
 
@@ -183,6 +210,12 @@ go build -o bin/rei-nation ./cmd/rei-nation
 ```
 
 Run `scripts/test-integration.sh` on Linux with Docker and OpenSSL to test NASCAR's deployed sockets and TSFP's PostgreSQL-backed service flows in a disposable Compose project. It binds the test stack to loopback. `REI_NATION_TEST_BIND`, `REI_NATION_TEST_PG_PORT`, and `REI_NATION_TEST_HEALTH_PORT` can move the test listeners if their defaults are already in use.
+
+Pushes to `main` deploy both the server and remote TSFP relay only after the
+verification and integration jobs pass. Deployment credentials live in the
+protected `production` GitHub environment, never in the public repository.
+An organization administrator must approve each production job. The SSH key is
+also restricted on each host to the matching script under `deploy/`.
 
 Title adapters live under `internal/games`. `internal/protocol/aries` handles wire framing and TCP connections, `internal/connectivity` handles peer introduction, and `internal/storage` handles PostgreSQL persistence.
 

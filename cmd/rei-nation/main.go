@@ -59,7 +59,7 @@ func run(health bool, log *slog.Logger) error {
 	if err != nil {
 		return errors.New("invalid REI_NATION_PUBLIC_IP")
 	}
-	conf := app.Config{Games: env("REI_NATION_GAMES", "nascar04"), Bind: bind, PublicIP: publicIP,
+	conf := app.Config{Games: env("REI_NATION_GAMES", "nascar04,tsfp"), Bind: bind, PublicIP: publicIP,
 		HealthPort: uint16(healthPort), Relay: env("REI_NATION_RELAY", "auto")}
 	conf.SendRecoveryMail, err = app.NewRecoverySender(os.Getenv("REI_NATION_SMTP_ADDR"), os.Getenv("REI_NATION_SMTP_FROM"),
 		os.Getenv("REI_NATION_SMTP_USER"), os.Getenv("REI_NATION_SMTP_PASSWORD"))
@@ -69,7 +69,11 @@ func run(health bool, log *slog.Logger) error {
 	selected, err := conf.Select([]game.Definition{nascar04.Definition(),
 		tsfp.Definition(env("REI_NATION_TSFP_CERT", "/tsfp-certs/fesl-cert.pem"),
 			env("REI_NATION_TSFP_KEY", "/tsfp-certs/fesl-key.pem"),
-			os.Getenv("REI_NATION_TSFP_RELAY_IP"))})
+			os.Getenv("REI_NATION_TSFP_RELAY_IP"), tsfp.RemoteRelayConfig{
+				TokensFile: os.Getenv("REI_NATION_TSFP_RELAY_TOKENS"),
+				CertFile:   os.Getenv("REI_NATION_TSFP_RELAY_CONTROL_CERT"),
+				KeyFile:    os.Getenv("REI_NATION_TSFP_RELAY_CONTROL_KEY"),
+			})})
 	if err != nil {
 		return err
 	}
