@@ -218,15 +218,15 @@ func (h *remoteRelayHub) accept(ctx context.Context, conn net.Conn) {
 	}
 	_ = conn.SetDeadline(time.Time{})
 	link := &relayControlLink{conn: conn, done: make(chan struct{}), pending: make(map[string]chan relayControlMessage)}
+	if err := link.send(relayControlMessage{Op: "ready"}); err != nil {
+		return
+	}
 	h.mu.Lock()
 	old := h.link
 	h.link = link
 	h.mu.Unlock()
 	if old != nil {
 		old.close()
-	}
-	if err := link.send(relayControlMessage{Op: "ready"}); err != nil {
-		return
 	}
 	h.log.Info("TSFP relay connected", "name", short(hello.Name, 32), "ip", h.ip)
 	defer func() {
