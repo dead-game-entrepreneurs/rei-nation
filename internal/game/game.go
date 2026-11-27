@@ -12,11 +12,13 @@ import (
 )
 
 type Definition struct {
-	Key     string
-	TCPPort uint16
-	AuxTCP  []uint16
-	UDP     []uint16
-	New     func(Options) Runtime
+	Key      string
+	TCPPort  uint16
+	AuxTCP   []uint16
+	UDP      []uint16
+	New      func(Options) Runtime
+	Serve    func(context.Context, net.Listener, Runtime) error
+	Validate func(netip.Addr) error
 }
 
 type Runtime interface {

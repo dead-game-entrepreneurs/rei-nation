@@ -16,6 +16,7 @@ if [[ "$REI_NATION_BIND" != 127.* ]]; then
 fi
 export REI_NATION_PUBLIC_IP="$REI_NATION_BIND"
 export REI_NATION_GAMES=nascar04 REI_NATION_RELAY=always
+export REI_NATION_TSFP_RELAY_IP=''
 export REI_NATION_HEALTH_PORT="${REI_NATION_TEST_HEALTH_PORT:-58088}"
 export REI_NATION_PG_PORT="${REI_NATION_TEST_PG_PORT:-55488}"
 export REI_NATION_IMAGE="$project:local"
@@ -43,4 +44,4 @@ export REI_NATION_TEST_RELAY_ADDR="$REI_NATION_BIND"
 export REI_NATION_TEST_PUBLIC_IP="$REI_NATION_PUBLIC_IP"
 export REI_NATION_TEST_DATABASE_URL="postgres://eanation:$POSTGRES_PASSWORD@127.0.0.1:$REI_NATION_PG_PORT/eanation?sslmode=disable"
 
-go test -race ./internal/games/nascar04 -count=1 -v
+go test -race ./internal/games/nascar04 ./internal/games/tsfp -count=1 -v
