@@ -189,11 +189,30 @@ func (s *server) hello(c *aries.Client, m fesl.Message) {
 	version, _ := m.Get("clientVersion")
 	protocol, _ := m.Get("protocolVersion")
 	s.opts.Log.Info("FESL hello", "conn", c.ID(), "client", client, "client_version", version, "protocol", protocol)
-	ip := s.opts.PublicIP.String()
+	ip := s.advertisedIP(c).String()
 	c.Send(fesl.Reply(m, "Hello",
 		fesl.Field{Key: "theaterIp", Value: ip},
 		fesl.Field{Key: "theaterPort", Value: strconv.Itoa(theaterPort)},
 		fesl.Field{Key: "messengerIp", Value: ip},
 		fesl.Field{Key: "messengerPort", Value: strconv.Itoa(messengerPort)},
 	))
+}
+
+// advertisedIP is the server address a client is told to use for the theater
+// and messenger. A client the server sees from a private address is on the
+// server's own network; pointing it at the public address would need the
+// router to loop traffic back, so it gets the address it already reached the
+// server on. Everyone else gets REI_NATION_PUBLIC_IP.
+func (s *server) advertisedIP(c *aries.Client) netip.Addr {
+	if lanAddr(c.Addr()) && !lanAddr(s.opts.PublicIP) {
+		if local := c.LocalAddr(); local.IsValid() && !local.IsUnspecified() {
+			return local
+		}
+	}
+	return s.opts.PublicIP
+}
+
+// lanAddr reports an address that only exists on a local network.
+func lanAddr(a netip.Addr) bool {
+	return a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast()
 }

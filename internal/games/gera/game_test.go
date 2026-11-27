@@ -62,8 +62,10 @@ func TestHelloPingGoodbye(t *testing.T) {
 	send(0xc0000001, "Hello", fesl.Field{Key: "clientString", Value: "gera"},
 		fesl.Field{Key: "clientPlatform", Value: "PS2"}, fesl.Field{Key: "fragmentSize", Value: "2048"})
 	hello := expect(0xc0000001, "Hello")
-	for key, want := range map[string]string{"theaterIp": "192.0.2.10", "theaterPort": "18041",
-		"messengerIp": "192.0.2.10", "messengerPort": "18042"} {
+	// The test client connects from loopback, a local-network address, so it
+	// is pointed at the address it reached rather than the public 192.0.2.10.
+	for key, want := range map[string]string{"theaterIp": "127.0.0.1", "theaterPort": "18041",
+		"messengerIp": "127.0.0.1", "messengerPort": "18042"} {
 		if got, _ := hello.Get(key); got != want {
 			t.Errorf("%s = %q, want %q", key, got, want)
 		}

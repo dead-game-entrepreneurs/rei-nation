@@ -296,7 +296,7 @@ func (h *theater) gameList(c *aries.Client, m fesl.Message, tid string) {
 	c.Send(fesl.Packet("GLST", msgOK, field("TID", tid), field("LID", lid),
 		field("NUM-GAMES", n), field("LOBBY-MAX-GAMES", "100"), field("LOBBY-NUM-GAMES", n)))
 	for _, g := range h.games {
-		c.Send(fesl.Packet("GDAT", msgOK, h.gameDataFields(g, tid, lid)...))
+		c.Send(fesl.Packet("GDAT", msgOK, h.gameDataFields(g, tid, lid, c.Addr().String())...))
 	}
 }
 
@@ -315,7 +315,7 @@ func (h *theater) gameData(c *aries.Client, m fesl.Message, tid string) {
 	if !ok || !validID(lid) {
 		lid = g.lid
 	}
-	c.Send(fesl.Packet("GDAT", msgOK, h.gameDataFields(g, tid, lid)...))
+	c.Send(fesl.Packet("GDAT", msgOK, h.gameDataFields(g, tid, lid, c.Addr().String())...))
 	details := []fesl.Field{field("TID", tid), field("LID", lid), field("GID", strconv.Itoa(gid)), field("UGID", strconv.Itoa(gid))}
 	for k, v := range g.details {
 		details = append(details, field(k, v))
@@ -336,8 +336,8 @@ func (h *theater) gameData(c *aries.Client, m fesl.Message, tid string) {
 
 // gameDataFields builds a GDAT body for a game, reported in the viewer's
 // lobby. Callers hold h.mu.
-func (h *theater) gameDataFields(g *hostedGame, tid, lid string) []fesl.Field {
-	ext := h.externalOf(g.owner, g.hostIP, g.port)
+func (h *theater) gameDataFields(g *hostedGame, tid, lid, viewerIP string) []fesl.Field {
+	ext := h.reachable(h.externalOf(g.owner, g.hostIP, g.port), viewerIP)
 	active, joining := playerCounts(g)
 	out := []fesl.Field{
 		field("TID", tid), field("LID", lid), field("GID", strconv.Itoa(g.gid)),
@@ -457,7 +457,7 @@ func (h *theater) enterGame(c *aries.Client, m fesl.Message, tid string) {
 		lid = g.lid
 	}
 	g.pending[pid] = &gamePlayer{writer: c, name: t.id.personaName, uid: t.id.personaID, ip: joinerIP, port: port, ticket: ticket, lid: lid, attrs: map[string]string{}}
-	ext := h.externalOf(c, joinerIP, port)
+	ext := h.reachable(h.externalOf(c, joinerIP, port), h.connIP[g.owner])
 	owner := g.owner
 	h.mu.Unlock()
 
@@ -665,10 +665,31 @@ func (h *theater) hostAddresses(g *hostedGame, joinerIP string, self bool) (prim
 	default:
 		primary, alternate = external, internal
 	}
+	primary, alternate = h.reachable(primary, joinerIP), h.reachable(alternate, joinerIP)
 	if alternate.ip == pcsx2SocketIP || alternate == primary {
 		alternate = addr{"0.0.0.0", 0}
 	}
 	return primary, alternate
+}
+
+// reachable returns an endpoint a viewer can use. The server sees consoles on
+// its own network by their private addresses, and those consoles share the
+// server's public address on the Internet. A viewer outside that network gets
+// the public address with the same port instead, which works when the router
+// forwards that port to the console (UDP 18040 for a host). Viewers on the
+// private network keep the private address, which needs no forwarding.
+// Callers hold h.mu.
+func (h *theater) reachable(a addr, viewerIP string) addr {
+	ip, err := netip.ParseAddr(a.ip)
+	viewer, verr := netip.ParseAddr(viewerIP)
+	public := h.srv.opts.PublicIP
+	if err != nil || verr != nil || !public.IsValid() || lanAddr(public) {
+		return a
+	}
+	if lanAddr(ip) && !lanAddr(viewer) {
+		return addr{public.String(), a.port}
+	}
+	return a
 }
 
 // udpKeepAlive keeps each console's theater UDP socket alive. PCSX2 unbinds a

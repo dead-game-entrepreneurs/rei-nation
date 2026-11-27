@@ -467,3 +467,49 @@ func TestTheaterEchoAttributionSharedIP(t *testing.T) {
 		t.Fatal("an IP with no session should not be attributed")
 	}
 }
+
+// A console the server sees from a private address is on the server's own
+// network and shares its public address on the Internet. Remote viewers must
+// get that public address; viewers on the same network keep the private one.
+func TestTheaterReachableEndpoint(t *testing.T) {
+	s := newTestServer(t) // REI_NATION_PUBLIC_IP 192.0.2.10
+	h := s.theater
+	lanHost := addr{"192.168.88.175", 18040}
+	cases := []struct {
+		name   string
+		in     addr
+		viewer string
+		want   addr
+	}{
+		{"remote viewer of LAN host", lanHost, "198.51.100.7", addr{"192.0.2.10", 18040}},
+		{"LAN viewer of LAN host", lanHost, "192.168.88.125", lanHost},
+		{"remote host", addr{"203.0.113.9", 40001}, "198.51.100.7", addr{"203.0.113.9", 40001}},
+		{"LAN viewer of remote host", addr{"203.0.113.9", 40001}, "192.168.88.125", addr{"203.0.113.9", 40001}},
+		{"suppressed alternate", addr{"0.0.0.0", 0}, "198.51.100.7", addr{"0.0.0.0", 0}},
+	}
+	for _, tc := range cases {
+		if got := h.reachable(tc.in, tc.viewer); got != tc.want {
+			t.Errorf("%s: reachable(%v, %s) = %v, want %v", tc.name, tc.in, tc.viewer, got, tc.want)
+		}
+	}
+
+	// With a private REI_NATION_PUBLIC_IP (a LAN-only server) nothing changes.
+	s.opts.PublicIP = netip.MustParseAddr("192.168.88.175")
+	if got := h.reachable(lanHost, "198.51.100.7"); got != lanHost {
+		t.Errorf("LAN-only server rewrote %v to %v", lanHost, got)
+	}
+
+	// A remote joiner of a LAN host gets the public address, and the host's
+	// internal address is never offered as an unreachable alternate.
+	s.opts.PublicIP = netip.MustParseAddr("192.0.2.10")
+	host := &aries.Client{}
+	h.mu.Lock()
+	h.observed[host] = lanHost
+	g := &hostedGame{owner: host, hostIP: "192.168.88.175", port: 18040,
+		internalIP: "192.168.88.175", internalPort: 18040}
+	primary, alternate := h.hostAddresses(g, "198.51.100.7", false)
+	h.mu.Unlock()
+	if primary != (addr{"192.0.2.10", 18040}) || alternate != (addr{"0.0.0.0", 0}) {
+		t.Errorf("remote joiner got primary %v alternate %v", primary, alternate)
+	}
+}

@@ -34,12 +34,19 @@ almost any NAT.
 ## Server
 
 1. Use a host with a public IPv4 address, or forward the ports below to it.
-2. Set `REI_NATION_PUBLIC_IP` to that public address. The FESL Hello reply
-   tells clients to reach the theater and messenger there, and the theater
-   uses it in no other way.
-3. Set `REI_NATION_GAMES=gera` and `REI_NATION_BIND=0.0.0.0` (or the address
+2. Set `REI_NATION_PUBLIC_IP` to that public address. Clients on the
+   Internet are told to reach the theater and messenger there. Clients the
+   server sees from a private address are on its own network, so they are
+   pointed at the address they already reached the server on and no router
+   loopback is needed.
+3. Consoles on the server's own network are seen by their private addresses.
+   When a remote player joins one of them, the server substitutes the public
+   address with the same port, so a host on the server's network must have
+   UDP 18040 forwarded to it. Players on the same network as each other keep
+   their private addresses and need no forwarding.
+4. Set `REI_NATION_GAMES=gera` and `REI_NATION_BIND=0.0.0.0` (or the address
    that receives the forwarded traffic).
-4. Open these ports to the players:
+5. Open these ports to the players:
 
    | Port | Protocol | Service |
    | --- | --- | --- |
@@ -49,7 +56,7 @@ almost any NAT.
    | 18042 | TCP | Messenger |
 
    PostgreSQL and the health endpoint stay on `127.0.0.1`; do not expose them.
-5. Keep TCP keepalive and the UDP keepalive running (both are on by default).
+6. Keep TCP keepalive and the UDP keepalive running (both are on by default).
    The server pokes each console's UDP port every 45 seconds, which keeps
    PCSX2 from closing it during a level load and keeps router mappings open.
 

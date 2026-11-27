@@ -37,6 +37,14 @@ func (c *Client) Addr() netip.Addr {
 	return c.conn.RemoteAddr().(*net.TCPAddr).AddrPort().Addr().Unmap()
 }
 
+// LocalAddr is the server address this client connected to.
+func (c *Client) LocalAddr() netip.Addr {
+	if a, ok := c.conn.LocalAddr().(*net.TCPAddr); ok {
+		return a.AddrPort().Addr().Unmap()
+	}
+	return netip.Addr{}
+}
+
 func (c *Client) ID() uint64 { return c.id }
 
 // Send queues in order without letting a slow client hold up a title runtime.
