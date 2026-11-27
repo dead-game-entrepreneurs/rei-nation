@@ -51,14 +51,17 @@ cursor=$(sudo -n journalctl -u tsfp-relay.service -n 0 --show-cursor --no-pager 
 test -n "$cursor"
 connected=false
 if sudo -n systemctl restart tsfp-relay.service; then
-  candidate_pid=$(sudo -n systemctl show --property MainPID --value tsfp-relay.service)
-  [[ $candidate_pid =~ ^[1-9][0-9]*$ ]]
   for _ in {1..15}; do
-    if sudo -n systemctl is-active --quiet tsfp-relay.service &&
+    candidate_pid=$(sudo -n systemctl show --property MainPID --value tsfp-relay.service)
+    if [[ $candidate_pid =~ ^[1-9][0-9]*$ ]] &&
+      sudo -n systemctl is-active --quiet tsfp-relay.service &&
       sudo -n journalctl -u tsfp-relay.service --after-cursor "$cursor" "_PID=$candidate_pid" --no-pager -o cat |
         grep -F '"msg":"relay control connected"' >/dev/null; then
-      connected=true
-      break
+      confirmed_pid=$(sudo -n systemctl show --property MainPID --value tsfp-relay.service)
+      if [[ $confirmed_pid == "$candidate_pid" ]]; then
+        connected=true
+        break
+      fi
     fi
     sleep 1
   done
