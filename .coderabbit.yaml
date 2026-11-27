@@ -3,7 +3,6 @@ language: en-US
 
 reviews:
   profile: assertive
-  enable_prompt_for_ai_agents: false
   auto_review:
     enabled: true
     auto_incremental_review: true
@@ -11,11 +10,6 @@ reviews:
   auto_approvals:
     enabled: false
   path_instructions:
-    - path: "{**,.*,**/.*/**}"
-      instructions: |
-        Keep each inline finding to at most two short lines. State the issue
-        and its impact on the first line, then the fix or missing evidence on
-        the second. Omit greetings, repeated context, and code blocks.
     - path: "**/*.go"
       instructions: |
         Follow AGENTS.md and check the ordinary entry point. Flag concrete
@@ -25,7 +19,9 @@ reviews:
         on every exit path. Check races, lock order, and concurrent shutdown.
         Reuse a shared package when its contract already fits. Keep packet and
         game policy in the title adapter. Extract new shared code for real
-        callers with the same behavior and a testable contract.
+        callers with the same behavior and a testable contract. Flag new or
+        edited handwritten code comments longer than two lines. Put longer
+        compatibility rationale in the title's notes and link to it from code.
     - path: "{cmd/**,internal/{app,game,protocol,connectivity,storage,games}/**}"
       instructions: |
         Check input and frame bounds, session and title authorization, safe
@@ -75,7 +71,7 @@ reviews:
           pending test status for adaptive claims. Fail if the assessment is
           missing, a supported forced route is omitted when fallback is
           unavailable, or the claims exceed the evidence. Name the title and
-          the missing route or evidence in at most two short lines.
+          the missing route or evidence.
   tools:
     golangci-lint:
       enabled: true

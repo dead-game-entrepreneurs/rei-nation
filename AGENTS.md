@@ -73,6 +73,10 @@ It starts its own loopback Compose project and database. Keep the live stack
 available while testing changes. Coordinate any restart with the person running
 the console test.
 
+Keep new and edited handwritten code comments to at most two lines. Explain
+why the code is needed or what constraint it preserves. Put longer explanations
+in the title's notes and link to them from the code.
+
 Update [`.env.example`](.env.example), [`compose.yaml`](compose.yaml), and the
 [README](README.md) when an operator-facing setting changes. Put title DNS
 examples in [`configs/`](configs/) with documentation addresses. List DNS names,
